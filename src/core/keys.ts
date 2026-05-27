@@ -16,6 +16,11 @@ export const keys = {
   openIndex: (sub: string) => `index:${sub}:open`,
   actionLock: (sub: string, targetId: string) => `action:${sub}:${targetId}`,
   config: (sub: string) => `config:${sub}`,
+  /** Token-bucket state for per-user appeal rate limiting. */
+  rateLimit: (sub: string, user: string) => `ratelimit:${sub}:${user}`,
+  /** Index of resolved appeals scored by purge-eligibility timestamp, so the
+   *  retention job can range-scan "everything due before now" efficiently. */
+  purgeIndex: (sub: string) => `index:${sub}:purge`,
 } as const;
 
 /**

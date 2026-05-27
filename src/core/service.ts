@@ -1,30 +1,31 @@
 /**
  * AppealService — the orchestration layer the UI and triggers call into.
  *
- * It coordinates:
- *   - the AppealStore (persistence)
- *   - the AiProvider  (optional triage + tone-softening)
- *   - reply rendering (templates.ts)
- *   - the Reddit API  (sending modmail, looking up the original action)
+ * Coordinates the store, the optional AI provider, reply rendering, and the
+ * Reddit gateway. This version adds input validation at the boundary, typed
+ * error propagation, telemetry, and reply-delivery error handling.
  *
- * The Reddit side is injected via a small `RedditGateway` interface rather than
- * importing Devvit directly, so the whole service can be unit-tested with fakes.
+ * The Reddit side is injected via `RedditGateway` so the service is unit-testable.
  */
 
 import { AppealStore, type NewAppealInput } from './store.js';
 import { buildReply } from './templates.js';
 import type { AiProvider } from '../ai/provider.js';
 import { selectProvider } from '../ai/provider.js';
-import type {
-  Appeal,
-  AppealDecision,
-  AppealSummary,
-} from './types.js';
+import type { Appeal, AppealDecision, AppealSummary } from './types.js';
+import {
+  validateSubmission,
+  validateDecision,
+  sanitiseText,
+  LIMITS,
+} from './validation/index.js';
+import { errors } from './errors/index.js';
+import {
+  type Telemetry,
+  defaultTelemetry,
+} from './observability/index.js';
 
-/** Minimal slice of the Reddit API the service needs. Devvit's `reddit`
- *  client satisfies a superset of this. */
 export interface RedditGateway {
-  /** Send a modmail / private reply to the appealing user. */
   sendReply(args: {
     subreddit: string;
     to: string;
@@ -40,7 +41,6 @@ export interface DecideInput {
   modId: string;
   modName: string;
   note: string;
-  /** If the mod edited the suggested reply, the final text they approved. */
   finalReply?: string;
 }
 
@@ -48,16 +48,39 @@ export class AppealService {
   constructor(
     private readonly store: AppealStore,
     private readonly reddit: RedditGateway,
-    /** Optional AI backend. When absent or disabled, a no-op is used. */
     private readonly aiBackend?: AiProvider,
+    private readonly tel: Telemetry = defaultTelemetry,
   ) {}
 
   // ---- intake ----------------------------------------------------------
 
-  /** A user submits an appeal. Returns null if a duplicate-open lock blocks it. */
-  async submitAppeal(input: NewAppealInput): Promise<Appeal | null> {
-    const appeal = await this.store.create(input);
-    if (!appeal) return null;
+  /**
+   * A user submits an appeal. Validates and sanitises input, then creates the
+   * appeal (which rate-limits and dedup-checks). Throws VALIDATION_FAILED,
+   * RATE_LIMITED, or DUPLICATE_OPEN_APPEAL as appropriate.
+   */
+  async submitAppeal(input: NewAppealInput): Promise<Appeal> {
+    const result = validateSubmission({
+      reason: input.reason,
+      acknowledged: input.acknowledged,
+      actionType: input.actionType,
+      targetId: input.targetId,
+      authorName: input.authorName,
+    });
+    if (!result.ok) {
+      throw errors.validation('Appeal submission is invalid.', {
+        issues: result.issues,
+      });
+    }
+
+    const clean: NewAppealInput = {
+      ...input,
+      reason: sanitiseText(input.reason, LIMITS.reasonMax),
+      originalContent: sanitiseText(input.originalContent, LIMITS.replyMax),
+      originalReason: sanitiseText(input.originalReason, LIMITS.replyMax),
+    };
+
+    const appeal = await this.store.create(clean);
 
     // Best-effort optional AI triage. Never blocks; never decides.
     const config = await this.store.getConfig(input.subreddit);
@@ -74,16 +97,17 @@ export class AppealService {
     return this.store.openQueue(subreddit);
   }
 
-  async open(subreddit: string, appealId: string): Promise<Appeal | null> {
+  async queuePage(subreddit: string, limit = 25, cursor?: number) {
+    return this.store.openQueuePage(subreddit, limit, cursor);
+  }
+
+  async open(subreddit: string, appealId: string): Promise<Appeal> {
     return this.store.markInReview(subreddit, appealId);
   }
 
   // ---- the human decision ----------------------------------------------
 
-  /**
-   * Produce a SUGGESTED reply for a decision (template + optional AI softening).
-   * The UI shows this to the mod for editing; nothing is sent here.
-   */
+  /** Produce a SUGGESTED reply (template + optional AI softening). Sends nothing. */
   async suggestReply(
     subreddit: string,
     appealId: string,
@@ -98,16 +122,28 @@ export class AppealService {
   }
 
   /**
-   * Record the mod's decision and send the (mod-approved) reply to the user.
-   * The decision is the human's; AI is nowhere in this path.
+   * Record the mod's decision and send the (mod-approved) reply. Validates the
+   * decision input. If reply delivery fails, the decision is still recorded
+   * (it's the source of truth) and a REPLY_DELIVERY_FAILED error is thrown so
+   * the surface can offer a resend — we never silently drop the user's reply.
    */
-  async decide(input: DecideInput): Promise<Appeal | null> {
-    const appeal = await this.store.get(input.subreddit, input.appealId);
-    if (!appeal) return null;
+  async decide(input: DecideInput): Promise<Appeal> {
+    const validation = validateDecision({
+      decision: input.decision,
+      note: input.note,
+      finalReply: input.finalReply,
+    });
+    if (!validation.ok) {
+      throw errors.validation('Decision is invalid.', {
+        issues: validation.issues,
+      });
+    }
 
+    const appeal = await this.store.getOrThrow(input.subreddit, input.appealId);
     const config = await this.store.getConfig(input.subreddit);
-    const replyText =
-      input.finalReply ?? buildReply(input.decision, config, appeal);
+    const replyText = input.finalReply
+      ? sanitiseText(input.finalReply, LIMITS.replyMax)
+      : buildReply(input.decision, config, appeal);
 
     const decided = await this.store.decide(
       input.subreddit,
@@ -116,18 +152,25 @@ export class AppealService {
       {
         modId: input.modId,
         modName: input.modName,
-        note: input.note,
+        note: sanitiseText(input.note ?? '', LIMITS.noteMax),
         replyText,
       },
     );
-    if (!decided) return null;
 
-    await this.reddit.sendReply({
-      subreddit: input.subreddit,
-      to: appeal.authorName,
-      subject: `Re: your appeal (${appeal.actionType})`,
-      body: replyText,
-    });
+    try {
+      await this.reddit.sendReply({
+        subreddit: input.subreddit,
+        to: appeal.authorName,
+        subject: `Re: your appeal (${appeal.actionType})`,
+        body: replyText,
+      });
+    } catch (e) {
+      this.tel.logger.log('error', 'reply delivery failed', {
+        sub: input.subreddit,
+        appealId: input.appealId,
+      });
+      throw errors.replyDelivery(appeal.authorName, e);
+    }
 
     return decided;
   }

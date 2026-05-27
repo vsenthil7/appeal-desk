@@ -120,30 +120,42 @@ unit-tested**, and the Devvit-specific code is a thin wiring shell on top.
    (mods & users)        │  ModAction trigger · scheduler · settings   │
                          └───────────────┬─────────────────────────────┘
                                          │ injects redis + reddit + (opt) ai
+                                         │ + telemetry (logger/metrics/clock)
                                          ▼
    ┌───────────────────────────────────────────────────────────────────────┐
    │                          Platform-free core                              │
    │                                                                          │
-   │   AppealService  ── orchestration: intake, suggest-reply, decide         │
-   │       │                                                                  │
-   │       ├── AppealStore ── persistence (the only thing that touches Redis) │
+   │   AppealService  ── orchestration: validate → intake → suggest → decide  │
+   │       │              (typed errors; reply-delivery handling; telemetry)  │
+   │       ├── validation  ── input checks + sanitisation at the boundary     │
+   │       ├── AppealStore ── persistence; the only code that touches Redis    │
+   │       │     ├── concurrency/optimistic ── WATCH/MULTI/EXEC version CAS    │
+   │       │     ├── concurrency/rateLimit  ── per-user token bucket           │
+   │       │     └── lifecycle/retention    ── purge + GDPR erasure            │
    │       ├── templates   ── reply rendering ({{var}} substitution)          │
    │       ├── dedup        ── deterministic duplicate/repeat detection       │
+   │       ├── errors       ── typed taxonomy (code/status/retryable)          │
+   │       ├── observability── logger · metrics · injectable clock            │
    │       └── AiProvider   ── optional triage + tone-softening (or no-op)     │
    │                                                                          │
-   │   RedditGateway (interface) ── send replies; satisfied by Devvit's API   │
+   │   RedditGateway · RedisLike (interfaces) ── satisfied by Devvit's API     │
    └───────────────────────────────────────────────────────────────────────┘
 ```
 
 Key boundaries:
 
 - **`core/` and `ai/` import nothing from Devvit.** They speak in plain domain
-  objects and small injectable interfaces (`RedditGateway`, `AiProvider`). That is
-  what makes 100% unit-test coverage achievable without the Devvit runtime.
+  objects and small injectable interfaces (`RedditGateway`, `RedisLike`,
+  `AiProvider`, `Telemetry`). That is what makes 100% unit-test coverage
+  achievable without the Devvit runtime.
 - **`AppealStore` is the only code that touches Redis.** Every key is built in one
-  place (`core/keys.ts`), so two call sites can never disagree on a key format.
+  place (`core/keys.ts`), and all mutations go through a `WATCH/MULTI/EXEC`
+  compare-and-set so concurrent writes can never silently clobber.
+- **Failures are typed, never silent.** Operations throw `AppealError`s carrying a
+  stable `code`, an HTTP-ish `status`, and a `retryable` flag — the UI maps these
+  to friendly messages; storage faults are distinguishable from validation faults.
 - **`server/context.ts` is the single adapter** that turns a Devvit context into a
-  fully-wired `AppealService`.
+  fully-wired `AppealService` (store + gateway + optional AI + telemetry).
 
 ## The AI stance: assistive, never decisive
 
@@ -216,6 +228,9 @@ settings panel — no code changes needed:
 |---|---|---|
 | `aiEnabled` | `false` | Turns the optional, assistive AI triage + tone-softening on. |
 | `slaHours` | `48` | Hours before an open appeal is flagged as aging and the mod team is nudged. |
+| `rateLimitCapacity` | `5` | Max appeals a single user may file in a burst. |
+| `rateLimitRefillPerHour` | `2` | Appeals replenished per hour (token-bucket refill). |
+| `retentionDays` | `180` | Days to keep resolved appeals before purge (`0` = keep forever). |
 | `templateUpheld` | (civil default) | Reply sent when an appeal is upheld. |
 | `templateOverturned` | (civil default) | Reply sent when an appeal is overturned. |
 | `templateMoreInfo` | (civil default) | Reply sent when more info is requested. |
@@ -239,29 +254,43 @@ appealdesk/
 │   ├── core/                ← platform-free, fully unit-tested
 │   │   ├── types.ts         domain model + default config
 │   │   ├── keys.ts          Redis key scheme + id generation
+│   │   ├── redisLike.ts     the narrow Redis interface the store depends on
 │   │   ├── dedup.ts         deterministic duplicate/repeat detection
-│   │   ├── store.ts         persistence layer (the only Redis-touching code)
-│   │   ├── service.ts       orchestration (intake / suggest-reply / decide)
+│   │   ├── store.ts         persistence; the only Redis-touching code (CAS-guarded)
+│   │   ├── service.ts       orchestration (validate / intake / suggest / decide)
 │   │   ├── templates.ts     reply rendering with {{var}} substitution
-│   │   └── format.ts        presentation helpers (labels, colours, relative time)
+│   │   ├── format.ts        presentation helpers (labels, colours, relative time)
+│   │   ├── errors/          typed error taxonomy (code/status/retryable)
+│   │   ├── validation/      input validation + sanitisation
+│   │   ├── observability/   logger, metrics, injectable clock, timing helper
+│   │   ├── concurrency/     optimistic CAS + status machine; token-bucket rate limit
+│   │   └── lifecycle/       retention purge + GDPR-style erasure
 │   ├── ai/
 │   │   └── provider.ts      optional AI layer + first-class no-op fallback
 │   ├── components/          ← Devvit Blocks UI
 │   │   ├── primitives.tsx   shared UI pieces (pills, fields, empty state)
 │   │   ├── Dashboard.tsx    the open-appeals queue
 │   │   ├── AppealDetail.tsx the single-appeal review + decision screen
-│   │   └── AppealsDashboardPost.tsx  stateful container wiring it together
+│   │   └── AppealsDashboardPost.tsx  stateful container (typed-error aware)
 │   └── server/              ← Devvit wiring (thin)
-│       ├── context.ts       builds AppealService from a Devvit context
+│       ├── context.ts       builds AppealService (store + gateway + AI + telemetry)
 │       ├── intake.ts        the user-facing structured appeal form
 │       ├── menu.tsx         menu items (create dashboard, appeal a removal)
 │       ├── triggers.ts      ModAction trigger (snapshot + civil invite)
 │       ├── scheduler.ts     SLA nudge job
 │       └── settings.ts      app settings + install lifecycle
-└── test/                    83 tests, 100% coverage of core/ & ai/
-    ├── helpers/fakeRedis.ts in-memory Redis stand-in
-    ├── keys.test.ts  dedup.test.ts  templates.test.ts  format.test.ts
-    ├── provider.test.ts  store.test.ts  service.test.ts
+├── bench/
+│   └── run.ts               dependency-free perf harness (npm run bench)
+├── docs/
+│   ├── ARCHITECTURE.md      diagrams: layers, lifecycle, sequences, data model
+│   ├── THREAT_MODEL.md      STRIDE pass, trust boundaries, accepted risks
+│   └── BENCHMARKS.md        methodology, baseline, scaling characteristics
+└── test/                    197 tests, 100% coverage of core/ & ai/
+    ├── helpers/fakeRedis.ts in-memory Redis stand-in (with WATCH/MULTI/EXEC)
+    ├── property/            fast-check invariant tests
+    ├── concurrency/         parallel-write / race tests
+    ├── keys · dedup · templates · format · provider · store · service
+    └── errors · validation · observability · rateLimit · optimistic · retention
 ```
 
 ## Data model & Redis schema
@@ -270,56 +299,96 @@ Every key is constructed in `core/keys.ts`:
 
 | Key | Type | Holds |
 |---|---|---|
-| `appeal:<sub>:<id>` | string (JSON) | The full `Appeal` record. |
+| `appeal:<sub>:<id>` | string (JSON) | The full `Appeal` record (carries a `version` for CAS). |
 | `history:<sub>:<user>` | sorted set | The user's appeal ids, scored by timestamp. |
-| `index:<sub>:open` | sorted set | Open-queue appeal ids, scored by timestamp. |
-| `action:<sub>:<targetId>` | string | The appeal id currently open for an action (the per-action lock). |
+| `index:<sub>:open` | sorted set | Open-queue appeal ids, scored by timestamp (paginated). |
+| `index:<sub>:purge` | sorted set | Resolved appeal ids scored by purge-eligibility time. |
+| `action:<sub>:<targetId>` | string | The appeal id currently open for an action (the per-action lock, claimed atomically). |
 | `action:<sub>:seed:<targetId>` | string (JSON) | Action snapshot stashed at removal/ban time for later appeal context. |
+| `ratelimit:<sub>:<user>` | string (JSON) | Token-bucket state for per-user appeal rate limiting. |
 | `config:<sub>` | string (JSON) | The `SubredditConfig`. |
 
 An `Appeal` carries the action context, the user's submission, a `TriageHint`
 (deterministic `repeatCount` + optional `duplicateOfAppealId`, plus an optional AI
-`model` label), an append-only `decisions` audit trail, and lifecycle `status`
-(`open → in_review → awaiting_user → resolved`).
+`model` label), an append-only `decisions` audit trail, a monotonic `version` for
+optimistic concurrency, and lifecycle `status`
+(`open → in_review → awaiting_user → resolved`, where `resolved` is terminal).
 
 ## Development, testing & coverage
 
 ```bash
 npm run build     # tsc --noEmit: type-checks the whole project incl. UI
-npm test          # vitest run: 83 tests
+npm test          # vitest run: 197 tests
 npm run test:watch
+npm run bench     # performance benchmarks (see docs/BENCHMARKS.md)
 npm run lint
 npm run format
 ```
 
 The test target is the entire **`core/` and `ai/`** surface — all the logic that can
-be wrong. Because that code is platform-free and the dependencies are injected, it is
-tested with an in-memory `FakeRedis` and fake gateway/AI, reaching:
+be wrong. Because that code is platform-free and the dependencies are injected
+(`RedisLike`, `RedditGateway`, `AiProvider`, `Telemetry`), it is tested with an
+in-memory `FakeRedis` (which implements real `WATCH/MULTI/EXEC` abort semantics) and
+fakes for the gateway, AI, clock, logger, and metrics — reaching:
 
 ```
-File           | % Stmts | % Branch | % Funcs | % Lines
----------------|---------|----------|---------|--------
-All files      |   100   |   100    |   100   |  100
- ai/provider   |   100   |   100    |   100   |  100
- core/dedup    |   100   |   100    |   100   |  100
- core/format   |   100   |   100    |   100   |  100
- core/keys     |   100   |   100    |   100   |  100
- core/service  |   100   |   100    |   100   |  100
- core/store    |   100   |   100    |   100   |  100
- core/templates|   100   |   100    |   100   |  100
+File                  | % Stmts | % Branch | % Funcs | % Lines
+----------------------|---------|----------|---------|--------
+All files             |   100   |   100    |   100   |  100
+ ai/provider          |   100   |   100    |   100   |  100
+ core/dedup           |   100   |   100    |   100   |  100
+ core/format          |   100   |   100    |   100   |  100
+ core/keys            |   100   |   100    |   100   |  100
+ core/service         |   100   |   100    |   100   |  100
+ core/store           |   100   |   100    |   100   |  100
+ core/templates       |   100   |   100    |   100   |  100
+ core/errors          |   100   |   100    |   100   |  100
+ core/validation      |   100   |   100    |   100   |  100
+ core/observability   |   100   |   100    |   100   |  100
+ core/concurrency     |   100   |   100    |   100   |  100
+ core/lifecycle       |   100   |   100    |   100   |  100
 ```
 
 Coverage thresholds are enforced in `vitest.config.ts` (the build fails below 100%).
 The Devvit `.tsx`/`server` glue is deliberately thin wiring, exercised live via
 `devvit playtest`, and excluded from the unit-coverage target — but it is fully
-type-checked by `npm run build` against the real `@devvit/public-api`.
+type-checked by `npm run build` against the real `@devvit/public-api`, and it now
+catches every typed `AppealError` and surfaces a friendly message.
 
-Notable edge cases under test: corrupt/missing Redis records, dangling index and
-history entries, the one-appeal-per-action lock (including a dangling lock), the
-full decision lifecycle and audit trail, AI enabled/disabled/declining/failing,
-defensive parsing of malformed model output, reply length-clamping, template
-variable substitution with unknown tokens, every label/colour branch, and a
-simulated TOCTOU race where an appeal vanishes between read and decide.
+Beyond happy-path unit tests, the suite includes **property-based tests**
+(fast-check: jaccard symmetry/bounds, rate-limiter invariants, sanitisation
+idempotence, template token-freedom) and **concurrency tests** (parallel decisions
+on one appeal, parallel duplicate submissions, interleaved review+decide). Notable
+edge cases: corrupt/missing Redis records, dangling indexes, the atomically-claimed
+one-appeal-per-action lock under contention, the full decision lifecycle and audit
+trail, the terminal-state guard, optimistic-lock conflicts and retries, rate-limit
+exhaustion and refill, retention purge and GDPR erasure (idempotent), every storage
+fault mapped to a typed error, AI enabled/disabled/declining/failing, and defensive
+parsing of malformed model output.
+
+## Production hardening
+
+This codebase is built to run for real users, so it goes beyond a hackathon MVP:
+
+- **Concurrency safety.** All mutations use a Redis `WATCH/MULTI/EXEC` compare-and-set
+  keyed on a per-record `version`; the per-action lock is claimed atomically and fails
+  closed. Concurrency tests prove two mods can't double-resolve an appeal and two users
+  can't open duplicate appeals for one action.
+- **Typed failure handling.** Every failure is an `AppealError` with a stable `code`,
+  `status`, and `retryable` flag — storage faults, validation, rate limits, conflicts,
+  and not-found are all distinguishable. Reply-delivery failure never rolls back a
+  recorded decision; it asks the mod to resend.
+- **Input validation & sanitisation** at the boundary (length caps, control-char
+  stripping, multi-issue aggregation).
+- **Rate limiting** (per-user token bucket) and **duplicate detection** protect mods
+  from floods and re-files.
+- **Data lifecycle.** Retention purges old resolved appeals; right-to-erasure redacts
+  PII while keeping an auditable tombstone.
+- **Observability.** A structured logger, metrics, and an injectable clock thread
+  through the core, ready to forward to a deployment's monitoring.
+- **Documented limits.** `docs/THREAT_MODEL.md` states trust boundaries and accepted
+  risks plainly; `docs/BENCHMARKS.md` documents the one real scaling characteristic
+  (per-user dedup history hydration is linear, bounded by retention).
 
 ## Design decisions & trade-offs
 

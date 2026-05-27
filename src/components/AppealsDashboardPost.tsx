@@ -21,6 +21,7 @@ import { AppealDetail } from './AppealDetail.js';
 import { makeService } from '../server/context.js';
 import type { Appeal, AppealDecision, AppealSummary } from '../core/types.js';
 import { decisionLabel } from '../core/format.js';
+import { isAppealError } from '../core/errors/index.js';
 
 export const AppealsDashboardPost: Devvit.CustomPostComponent = (context) => {
   const subreddit = context.subredditName ?? '';
@@ -31,18 +32,29 @@ export const AppealsDashboardPost: Devvit.CustomPostComponent = (context) => {
   // Bump to force a queue/detail reload after a decision.
   const [version, setVersion] = useState(0);
 
-  // Load the open queue (when on the list screen).
+  // Load the open queue (when on the list screen). Errors degrade to an empty
+  // list rather than crashing the post; useAsync also exposes `.error`.
   const queue = useAsync<JSONValue>(
-    async () => (await service.queue(subreddit)) as unknown as JSONValue,
+    async () => {
+      try {
+        return (await service.queue(subreddit)) as unknown as JSONValue;
+      } catch {
+        return [] as unknown as JSONValue;
+      }
+    },
     { depends: [version, openId] },
   );
 
   // Load the active appeal (when on the detail screen).
   const detail = useAsync<JSONValue>(
-    async () =>
-      openId
-        ? ((await service.open(subreddit, openId)) as unknown as JSONValue)
-        : null,
+    async () => {
+      if (!openId) return null;
+      try {
+        return (await service.open(subreddit, openId)) as unknown as JSONValue;
+      } catch {
+        return null;
+      }
+    },
     { depends: [openId, version] },
   );
 
@@ -88,34 +100,45 @@ export const AppealsDashboardPost: Devvit.CustomPostComponent = (context) => {
     async (values) => {
       if (!openId) return;
       const me = await context.reddit.getCurrentUser();
-      const decided = await service.decide({
-        subreddit,
-        appealId: openId,
-        decision: (values.decision as AppealDecision) ?? 'upheld',
-        modId: me?.id ?? 'unknown',
-        modName: me?.username ?? 'a moderator',
-        note: (values.note as string) ?? '',
-        finalReply: values.reply as string,
-      });
-      if (decided) {
+      const decision = (values.decision as AppealDecision) ?? 'upheld';
+      try {
+        await service.decide({
+          subreddit,
+          appealId: openId,
+          decision,
+          modId: me?.id ?? 'unknown',
+          modName: me?.username ?? 'a moderator',
+          note: (values.note as string) ?? '',
+          finalReply: values.reply as string,
+        });
         context.ui.showToast({
           appearance: 'success',
-          text: `Appeal ${decisionLabel(
-            (values.decision as AppealDecision) ?? 'upheld',
-          ).toLowerCase()} and reply sent.`,
+          text: `Appeal ${decisionLabel(decision).toLowerCase()} and reply sent.`,
         });
-        setOpenId(null);
-        setVersion((v) => v + 1);
-      } else {
-        context.ui.showToast({ text: 'Could not record the decision.' });
+      } catch (e) {
+        if (isAppealError(e) && e.code === 'REPLY_DELIVERY_FAILED') {
+          // The decision WAS recorded; only the reply failed to send.
+          context.ui.showToast({
+            text: 'Decision recorded, but the reply could not be sent. Try resending.',
+          });
+        } else {
+          context.ui.showToast({ text: 'Could not record the decision.' });
+          return; // keep the mod on the appeal so they can retry
+        }
       }
+      setOpenId(null);
+      setVersion((v) => v + 1);
     },
   );
 
   async function startDecision(decision: AppealDecision): Promise<void> {
     if (!openId) return;
-    const suggested = await service.suggestReply(subreddit, openId, decision);
-    context.ui.showForm(replyForm, { decision, suggested });
+    try {
+      const suggested = await service.suggestReply(subreddit, openId, decision);
+      context.ui.showForm(replyForm, { decision, suggested });
+    } catch {
+      context.ui.showForm(replyForm, { decision, suggested: '' });
+    }
   }
 
   // ---- render ----------------------------------------------------------

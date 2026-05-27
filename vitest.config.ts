@@ -15,6 +15,9 @@ export default defineConfig({
         'src/core/**/*.ts',
         'src/ai/**/*.ts',
       ],
+      exclude: [
+        'src/core/**/*.test.ts',
+      ],
       thresholds: {
         lines: 100,
         functions: 100,

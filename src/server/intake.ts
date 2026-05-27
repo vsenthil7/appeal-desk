@@ -15,6 +15,7 @@
 import { Devvit } from '@devvit/public-api';
 import { makeService } from './context.js';
 import { keys } from '../core/keys.js';
+import { isAppealError } from '../core/errors/index.js';
 import type { ActionType } from '../core/types.js';
 
 /** Shape of the snapshot stashed by the menu item / trigger. */
@@ -91,23 +92,21 @@ export const intakeForm = Devvit.createForm(
     }
 
     const service = makeService(context);
-    const appeal = await service.submitAppeal({
-      subreddit,
-      actionType,
-      targetId,
-      authorId: user.id,
-      authorName: user.username,
-      reason: (values.reason as string) ?? '',
-      acknowledged: Boolean(values.acknowledged),
-      originalContent: snapshot.originalContent,
-      originalReason: snapshot.originalReason,
-      permalink: snapshot.permalink,
-    });
-
-    if (!appeal) {
-      context.ui.showToast({
-        text: 'You already have an open appeal for this action.',
+    try {
+      await service.submitAppeal({
+        subreddit,
+        actionType,
+        targetId,
+        authorId: user.id,
+        authorName: user.username,
+        reason: (values.reason as string) ?? '',
+        acknowledged: Boolean(values.acknowledged),
+        originalContent: snapshot.originalContent,
+        originalReason: snapshot.originalReason,
+        permalink: snapshot.permalink,
       });
+    } catch (e) {
+      context.ui.showToast({ text: messageForError(e) });
       return;
     }
 
@@ -117,3 +116,22 @@ export const intakeForm = Devvit.createForm(
     });
   },
 );
+
+/** Map a thrown AppealError to a short, user-appropriate message. */
+function messageForError(e: unknown): string {
+  if (isAppealError(e)) {
+    switch (e.code) {
+      case 'DUPLICATE_OPEN_APPEAL':
+        return 'You already have an open appeal for this action.';
+      case 'RATE_LIMITED':
+        return 'You have appealed too many times recently. Please try later.';
+      case 'VALIDATION_FAILED':
+        return 'Please check your appeal — the reason looks too short or invalid.';
+      case 'STORAGE_UNAVAILABLE':
+        return 'Something went wrong saving your appeal. Please try again.';
+      default:
+        return 'Your appeal could not be submitted. Please try again.';
+    }
+  }
+  return 'Your appeal could not be submitted. Please try again.';
+}

@@ -73,6 +73,10 @@ export interface Appeal {
   triage: TriageHint;
   decisions: DecisionRecord[]; // append-only audit trail (latest is current)
 
+  /** Monotonic version for optimistic concurrency control. Incremented on
+   *  every persisted mutation; a compare-and-set rejects stale writes. */
+  version: number;
+
   createdAt: number; // epoch ms
   updatedAt: number; // epoch ms
 }
@@ -97,12 +101,22 @@ export interface SubredditConfig {
   templates: Record<AppealDecision, string>;
   /** If true, a user may file at most one open appeal per action. */
   oneAppealPerAction: boolean;
+  /** Rate limit: burst capacity of appeals a single user may file. */
+  rateLimitCapacity: number;
+  /** Rate limit: appeals replenished per hour. */
+  rateLimitRefillPerHour: number;
+  /** Days after resolution before an appeal is eligible for archival/purge.
+   *  0 disables retention (keep forever). */
+  retentionDays: number;
 }
 
 export const DEFAULT_CONFIG: SubredditConfig = {
   slaHours: 48,
   aiEnabled: false,
   oneAppealPerAction: true,
+  rateLimitCapacity: 5,
+  rateLimitRefillPerHour: 2,
+  retentionDays: 180,
   templates: {
     upheld:
       "We've reviewed your appeal and the original decision stands. " +

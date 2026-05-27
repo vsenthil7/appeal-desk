@@ -28,6 +28,27 @@ Devvit.addSettings([
     scope: 'installation',
   },
   {
+    type: 'number',
+    name: 'rateLimitCapacity',
+    label: 'Max appeals a single user may file in a burst',
+    defaultValue: DEFAULT_CONFIG.rateLimitCapacity,
+    scope: 'installation',
+  },
+  {
+    type: 'number',
+    name: 'rateLimitRefillPerHour',
+    label: 'Appeals replenished per hour (rate-limit refill)',
+    defaultValue: DEFAULT_CONFIG.rateLimitRefillPerHour,
+    scope: 'installation',
+  },
+  {
+    type: 'number',
+    name: 'retentionDays',
+    label: 'Days to keep resolved appeals before purge (0 = keep forever)',
+    defaultValue: DEFAULT_CONFIG.retentionDays,
+    scope: 'installation',
+  },
+  {
     type: 'paragraph',
     name: 'templateUpheld',
     label: 'Reply template — Upheld',
@@ -64,6 +85,15 @@ export async function syncConfigFromSettings(
 
   const aiEnabled = (await context.settings.get<boolean>('aiEnabled')) ?? false;
   const slaHours = (await context.settings.get<number>('slaHours')) ?? 48;
+  const rateLimitCapacity =
+    (await context.settings.get<number>('rateLimitCapacity')) ??
+    DEFAULT_CONFIG.rateLimitCapacity;
+  const rateLimitRefillPerHour =
+    (await context.settings.get<number>('rateLimitRefillPerHour')) ??
+    DEFAULT_CONFIG.rateLimitRefillPerHour;
+  const retentionDays =
+    (await context.settings.get<number>('retentionDays')) ??
+    DEFAULT_CONFIG.retentionDays;
   const templates: Record<AppealDecision, string> = {
     upheld:
       (await context.settings.get<string>('templateUpheld')) ??
@@ -80,6 +110,9 @@ export async function syncConfigFromSettings(
     ...DEFAULT_CONFIG,
     aiEnabled,
     slaHours,
+    rateLimitCapacity,
+    rateLimitRefillPerHour,
+    retentionDays,
     templates,
   });
 }

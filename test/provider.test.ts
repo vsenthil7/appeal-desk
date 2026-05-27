@@ -24,6 +24,7 @@ function makeAppeal(overrides: Partial<Appeal> = {}): Appeal {
     status: 'open',
     triage: { repeatCount: 1, duplicateOfAppealId: 'ap_old' },
     decisions: [],
+    version: 1,
     createdAt: 1,
     updatedAt: 1,
     ...overrides,

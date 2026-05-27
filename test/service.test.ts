@@ -69,10 +69,12 @@ describe('AppealService.submitAppeal', () => {
     expect(reloaded!.triage.model).toBeUndefined();
   });
 
-  it('returns null when a duplicate-open lock blocks submission', async () => {
+  it('throws DUPLICATE_OPEN_APPEAL when a lock blocks submission', async () => {
     const service = new AppealService(store, gateway, new NoopAiProvider());
     await service.submitAppeal(baseInput);
-    expect(await service.submitAppeal(baseInput)).toBeNull();
+    await expect(service.submitAppeal(baseInput)).rejects.toMatchObject({
+      code: 'DUPLICATE_OPEN_APPEAL',
+    });
   });
 });
 
@@ -160,39 +162,93 @@ describe('AppealService.decide', () => {
     expect(gateway.sent[0]!.body).toBe('Custom reply from the mod.');
   });
 
-  it('returns null and sends nothing for a missing appeal', async () => {
-    const decided = await service.decide({
-      subreddit: 'aww',
-      appealId: 'missing',
-      decision: 'upheld',
-      modId: 'm',
-      modName: 'mod',
-      note: '',
-    });
-    expect(decided).toBeNull();
+  it('throws APPEAL_NOT_FOUND and sends nothing for a missing appeal', async () => {
+    await expect(
+      service.decide({
+        subreddit: 'aww',
+        appealId: 'missing',
+        decision: 'upheld',
+        modId: 'm',
+        modName: 'mod',
+        note: '',
+      }),
+    ).rejects.toMatchObject({ code: 'APPEAL_NOT_FOUND' });
     expect(gateway.sent).toHaveLength(0);
   });
 
-  it('returns null without sending if the appeal vanishes between read and decide', async () => {
-    // Simulate a TOCTOU race: get() finds the appeal, but decide() then finds
-    // it gone (e.g. concurrently resolved/deleted). The reply must NOT be sent.
+  it('records the decision but throws REPLY_DELIVERY_FAILED if delivery fails', async () => {
+    // The decision is the source of truth and must persist even when the reply
+    // can't be sent; the surface gets a typed error so it can offer a resend.
     const a = await service.submitAppeal(baseInput);
-    const racingStore = Object.create(store) as AppealStore;
-    racingStore.decide = async () => null; // decide loses the race
-    const racingService = new AppealService(
-      racingStore,
-      gateway,
-      new NoopAiProvider(),
-    );
-    const decided = await racingService.decide({
+    const failingGateway: RedditGateway = {
+      async sendReply() {
+        throw new Error('modmail down');
+      },
+    };
+    const svc = new AppealService(store, failingGateway, new NoopAiProvider());
+    await expect(
+      svc.decide({
+        subreddit: 'aww',
+        appealId: a.id,
+        decision: 'upheld',
+        modId: 'm',
+        modName: 'mod',
+        note: '',
+      }),
+    ).rejects.toMatchObject({ code: 'REPLY_DELIVERY_FAILED' });
+    // The decision still landed.
+    const reloaded = await store.get('aww', a.id);
+    expect(reloaded!.status).toBe('resolved');
+  });
+
+  it('rejects an invalid decision with VALIDATION_FAILED', async () => {
+    const a = await service.submitAppeal(baseInput);
+    await expect(
+      service.decide({
+        subreddit: 'aww',
+        appealId: a.id,
+        decision: 'banhammer' as never,
+        modId: 'm',
+        modName: 'mod',
+        note: '',
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
+  it('handles a null/undefined note by storing an empty string', async () => {
+    const a = await service.submitAppeal(baseInput);
+    const decided = await service.decide({
       subreddit: 'aww',
-      appealId: a!.id,
+      appealId: a.id,
       decision: 'upheld',
       modId: 'm',
       modName: 'mod',
-      note: '',
+      note: undefined as unknown as string,
     });
-    expect(decided).toBeNull();
-    expect(gateway.sent).toHaveLength(0);
+    expect(decided.decisions[0]!.note).toBe('');
+  });
+});
+
+describe('AppealService.submitAppeal validation', () => {
+  it('rejects an invalid submission with VALIDATION_FAILED before storage', async () => {
+    const store = new AppealStore(new FakeRedis() as never);
+    const gateway = new FakeGateway();
+    const service = new AppealService(store, gateway, new NoopAiProvider());
+    await expect(
+      service.submitAppeal({ ...baseInput, reason: 'too short' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    // Nothing was created.
+    expect(await store.openCount('aww')).toBe(0);
+  });
+});
+
+describe('AppealService.queuePage', () => {
+  it('delegates to the store and returns a page', async () => {
+    const store = new AppealStore(new FakeRedis() as never);
+    const service = new AppealService(store, new FakeGateway(), new NoopAiProvider());
+    await service.submitAppeal(baseInput);
+    const page = await service.queuePage('aww', 10);
+    expect(page.items).toHaveLength(1);
+    expect(page.nextCursor).toBeNull();
   });
 });

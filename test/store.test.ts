@@ -91,8 +91,9 @@ describe('AppealStore.create & reads', () => {
   it('blocks a second OPEN appeal for the same action when oneAppealPerAction', async () => {
     const first = await store.create(input());
     expect(first).not.toBeNull();
-    const blocked = await store.create(input());
-    expect(blocked).toBeNull();
+    await expect(store.create(input())).rejects.toMatchObject({
+      code: 'DUPLICATE_OPEN_APPEAL',
+    });
   });
 
   it('allows a new appeal once the prior one for the action is resolved', async () => {
@@ -115,17 +116,23 @@ describe('AppealStore.create & reads', () => {
     expect(b).not.toBeNull();
   });
 
-  it('does not block when the lock points at a missing appeal', async () => {
-    // Seed a dangling lock with no backing appeal record.
+  it('fails closed when the lock points at a missing appeal (concurrent claim safety)', async () => {
+    // A lock pointing at an unpersisted appeal is treated as an in-flight
+    // concurrent claim, so a second create is rejected rather than racing.
+    // This is the safe stance: a genuinely stale lock is a data anomaly that
+    // resolution/purge prevents, and blocking is preferable to a double appeal.
     await redis.set(keys.actionLock('aww', 't2_alice'), 'ap_ghost');
-    const a = await store.create(input());
-    expect(a).not.toBeNull();
+    await expect(store.create(input())).rejects.toMatchObject({
+      code: 'DUPLICATE_OPEN_APPEAL',
+    });
   });
 
-  it('get returns null for a missing or corrupt record', async () => {
+  it('get returns null for a missing record and throws for a corrupt one', async () => {
     expect(await store.get('aww', 'nope')).toBeNull();
     await redis.set(keys.appeal('aww', 'bad'), '{broken');
-    expect(await store.get('aww', 'bad')).toBeNull();
+    await expect(store.get('aww', 'bad')).rejects.toMatchObject({
+      code: 'DATA_CORRUPTION',
+    });
   });
 
   it('priorAppeals skips ids whose records are missing', async () => {
@@ -161,12 +168,14 @@ describe('AppealStore.markInReview', () => {
     expect(r!.status).toBe('in_review');
   });
 
-  it('is idempotent for non-open appeals and returns null for missing', async () => {
+  it('is idempotent for non-open appeals and throws for missing', async () => {
     const a = await store.create(input());
-    await store.markInReview('aww', a!.id); // now in_review
-    const again = await store.markInReview('aww', a!.id);
-    expect(again!.status).toBe('in_review');
-    expect(await store.markInReview('aww', 'missing')).toBeNull();
+    await store.markInReview('aww', a.id); // now in_review
+    const again = await store.markInReview('aww', a.id);
+    expect(again.status).toBe('in_review');
+    await expect(store.markInReview('aww', 'missing')).rejects.toMatchObject({
+      code: 'APPEAL_NOT_FOUND',
+    });
   });
 });
 
@@ -180,8 +189,10 @@ describe('AppealStore.decide', () => {
 
   const rec = { modId: 'm1', modName: 'mod', note: 'n', replyText: 'r' };
 
-  it('returns null for a missing appeal', async () => {
-    expect(await store.decide('aww', 'missing', 'upheld', rec)).toBeNull();
+  it('throws APPEAL_NOT_FOUND for a missing appeal', async () => {
+    await expect(
+      store.decide('aww', 'missing', 'upheld', rec),
+    ).rejects.toMatchObject({ code: 'APPEAL_NOT_FOUND' });
   });
 
   it('resolving removes it from the open queue and releases the lock', async () => {
@@ -228,14 +239,14 @@ describe('AppealStore.setAiLabel', () => {
     expect(reloaded!.triage.model?.label).toBe('likely_genuine');
   });
 
-  it('is a no-op for a missing appeal', async () => {
+  it('throws APPEAL_NOT_FOUND for a missing appeal', async () => {
     await expect(
       store.setAiLabel('aww', 'missing', {
         label: 'likely_genuine',
         confidence: 0.5,
         rationale: 'x',
       }),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({ code: 'APPEAL_NOT_FOUND' });
   });
 });
 
@@ -255,6 +266,7 @@ describe('summarise', () => {
       status: 'open',
       triage: { repeatCount: 3 },
       decisions: [],
+      version: 1,
       createdAt: 42,
       updatedAt: 42,
     };
