@@ -1,0 +1,27 @@
+{
+  "name": "appealdesk",
+  "version": "0.1.0",
+  "description": "A structured, fair appeals workflow for Reddit removals & bans. Built on Devvit for Track 1 — Best New Mod Tool.",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "scripts": {
+    "dev": "devvit playtest",
+    "upload": "devvit upload",
+    "build": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.{ts,tsx}\"",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@devvit/public-api": "0.11.x"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@vitest/coverage-v8": "^1.4.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.4.0"
+  }
+}

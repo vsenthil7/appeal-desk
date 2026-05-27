@@ -1,0 +1,119 @@
+/**
+ * Intake — the structured appeal form a user fills in. This is the heart of the
+ * "structured intake vs angry free-text modmail" improvement: instead of a
+ * rant, we capture a reason in a dedicated field plus an explicit rule
+ * acknowledgement, all tied to the original action id.
+ *
+ * The original content / removal reason are shown to the MOD on the dashboard,
+ * not to the appealing user, so they are NOT form fields. Instead, the menu
+ * item (or the ModAction trigger) stashes an action snapshot in Redis keyed by
+ * the target id; this submit handler reads that snapshot back. Only the
+ * action type and target id round-trip through the form (as disabled fields)
+ * so the user sees what they're appealing.
+ */
+
+import { Devvit } from '@devvit/public-api';
+import { makeService } from './context.js';
+import { keys } from '../core/keys.js';
+import type { ActionType } from '../core/types.js';
+
+/** Shape of the snapshot stashed by the menu item / trigger. */
+interface ActionSnapshot {
+  actionType: ActionType;
+  originalContent: string;
+  originalReason: string;
+  permalink?: string;
+}
+
+/** Build the intake form. `data` carries the action being appealed. */
+export const intakeForm = Devvit.createForm(
+  (data) => ({
+    title: 'Appeal this moderator action',
+    description:
+      'Appeals are reviewed by a human moderator. Be clear and civil — ' +
+      'that gives your appeal the best chance.',
+    acceptLabel: 'Submit appeal',
+    fields: [
+      {
+        type: 'string',
+        name: 'actionType',
+        label: 'Action',
+        defaultValue: (data.actionType as string) ?? 'removal',
+        disabled: true,
+      },
+      {
+        type: 'string',
+        name: 'targetId',
+        label: 'Reference',
+        defaultValue: (data.targetId as string) ?? '',
+        disabled: true,
+      },
+      {
+        type: 'paragraph',
+        name: 'reason',
+        label: 'Why should this be reconsidered?',
+        helpText: 'Explain calmly. Repeating the same appeal will be flagged.',
+        required: true,
+      },
+      {
+        type: 'boolean',
+        name: 'acknowledged',
+        label: 'I understand which rule was involved.',
+        defaultValue: false,
+      },
+    ],
+  }),
+  async (event, context) => {
+    const subreddit = context.subredditName ?? '';
+    const user = await context.reddit.getCurrentUser();
+    if (!user) {
+      context.ui.showToast({ text: 'You must be signed in to appeal.' });
+      return;
+    }
+
+    const values = event.values;
+    const targetId = (values.targetId as string) ?? 'unknown';
+    const actionType = (values.actionType as ActionType) ?? 'removal';
+
+    // Read the action snapshot the menu item / trigger stashed for this target.
+    let snapshot: ActionSnapshot = {
+      actionType,
+      originalContent: '(not captured)',
+      originalReason: '(see mod log)',
+    };
+    try {
+      const raw = await context.redis.get(
+        keys.actionLock(subreddit, `seed:${targetId}`),
+      );
+      if (raw) snapshot = { ...snapshot, ...(JSON.parse(raw) as ActionSnapshot) };
+    } catch {
+      // Non-fatal — placeholders are fine; the appeal still works.
+    }
+
+    const service = makeService(context);
+    const appeal = await service.submitAppeal({
+      subreddit,
+      actionType,
+      targetId,
+      authorId: user.id,
+      authorName: user.username,
+      reason: (values.reason as string) ?? '',
+      acknowledged: Boolean(values.acknowledged),
+      originalContent: snapshot.originalContent,
+      originalReason: snapshot.originalReason,
+      permalink: snapshot.permalink,
+    });
+
+    if (!appeal) {
+      context.ui.showToast({
+        text: 'You already have an open appeal for this action.',
+      });
+      return;
+    }
+
+    context.ui.showToast({
+      appearance: 'success',
+      text: 'Appeal submitted. A moderator will review it.',
+    });
+  },
+);
