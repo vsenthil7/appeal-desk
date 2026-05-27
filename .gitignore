@@ -3,3 +3,15 @@ coverage/
 dist/
 *.log
 .DS_Store
+
+# Devvit upload / login artefacts
+.env
+.devvit/
+
+# Python tooling (submission_media scripts)
+__pycache__/
+*.pyc
+.venv/
+
+# Submission media backups (kept locally for safety, redundant in git)
+submission_media/_backup/
