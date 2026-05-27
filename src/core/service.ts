@@ -8,7 +8,7 @@
  * The Reddit side is injected via `RedditGateway` so the service is unit-testable.
  */
 
-import { AppealStore, type NewAppealInput } from './store.js';
+import { AppealStore, type NewAppealInput, type QueueCursor } from './store.js';
 import { buildReply } from './templates.js';
 import type { AiProvider } from '../ai/provider.js';
 import { selectProvider } from '../ai/provider.js';
@@ -97,7 +97,7 @@ export class AppealService {
     return this.store.openQueue(subreddit);
   }
 
-  async queuePage(subreddit: string, limit = 25, cursor?: number) {
+  async queuePage(subreddit: string, limit = 25, cursor?: QueueCursor) {
     return this.store.openQueuePage(subreddit, limit, cursor);
   }
 
@@ -173,5 +173,42 @@ export class AppealService {
     }
 
     return decided;
+  }
+
+  // ---- lifecycle: retention & erasure ----------------------------------
+  //
+  // The store has always implemented these, but nothing in the app called
+  // them — they were effectively dead code despite being advertised in the
+  // README and threat model. Exposing them on the service gives the shell
+  // (a scheduled job, a mod menu item) a single, testable entry point.
+
+  /**
+   * Right-to-erasure for a single appeal: scrub the user's free text while
+   * keeping an auditable tombstone. Idempotent.
+   */
+  async eraseAppeal(subreddit: string, appealId: string): Promise<Appeal> {
+    return this.store.redactAppeal(subreddit, appealId);
+  }
+
+  /**
+   * Erase every appeal a user has filed in this subreddit (their full history).
+   * Returns the ids that were redacted. Idempotent per appeal.
+   */
+  async eraseUser(subreddit: string, username: string): Promise<string[]> {
+    const ids = await this.store.historyIds(subreddit, username);
+    const redacted: string[] = [];
+    for (const id of ids) {
+      await this.store.redactAppeal(subreddit, id);
+      redacted.push(id);
+    }
+    return redacted;
+  }
+
+  /**
+   * Run one retention purge batch (resolved appeals past their window). Returns
+   * the purged ids. Callers loop until a short batch to drain a backlog.
+   */
+  async purgeRetention(subreddit: string, limit = 100): Promise<string[]> {
+    return this.store.purgeExpired(subreddit, limit);
   }
 }

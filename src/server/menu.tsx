@@ -70,7 +70,7 @@ Devvit.addMenuItem({
     // Stash an action snapshot for the submit handler to read back. The mod
     // sees this on the dashboard; it never enters the user's editable form.
     await context.redis.set(
-      keys.actionLock(subreddit, `seed:${targetId}`),
+      keys.actionSeed(subreddit, targetId),
       JSON.stringify({ actionType, originalContent, originalReason, permalink }),
     );
 

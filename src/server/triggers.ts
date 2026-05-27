@@ -72,7 +72,7 @@ Devvit.addTrigger({
 
     // Record a lightweight action snapshot for later appeal context.
     await context.redis.set(
-      keys.actionLock(sub.name, `seed:${targetId}`),
+      keys.actionSeed(sub.name, targetId),
       JSON.stringify({
         actionType,
         originalContent,

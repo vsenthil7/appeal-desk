@@ -111,7 +111,7 @@ export class MemoryMetrics implements Metrics {
     this.events.push({ type: 'gauge', name, value, tags });
   }
   timing(name: string, ms: number, tags: Record<string, string> = {}): void {
-    this.events.push({ type: 'timing', name, ms: ms, value: ms, tags } as MetricEvent);
+    this.events.push({ type: 'timing', name, value: ms, tags });
   }
 
   /** Sum of a counter across all matching events. */

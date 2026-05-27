@@ -9,8 +9,12 @@
 import { Devvit } from '@devvit/public-api';
 import { AppealsDashboardPost } from './components/AppealsDashboardPost.js';
 
-// Capabilities. `redditAPI` for actions/modmail, `redis` for storage,
-// `scheduler` for SLA nudges. No `http` — Appealdesk is fully on-platform.
+// Capabilities. `redditAPI` for actions/modmail, `redis` for storage. No
+// `http` — Appealdesk is fully on-platform. Scheduler is NOT a configure()
+// option in this Devvit version (0.11.x): it is enabled by declaring
+// `scheduler: true` in devvit.yaml (done) plus registering jobs via
+// `Devvit.addSchedulerJob` (see server/scheduler.ts). Adding it here would not
+// type-check.
 Devvit.configure({
   redditAPI: true,
   redis: true,

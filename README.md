@@ -277,7 +277,7 @@ appealdesk/
 │       ├── intake.ts        the user-facing structured appeal form
 │       ├── menu.tsx         menu items (create dashboard, appeal a removal)
 │       ├── triggers.ts      ModAction trigger (snapshot + civil invite)
-│       ├── scheduler.ts     SLA nudge job
+│       ├── scheduler.ts     SLA nudge + retention purge jobs
 │       └── settings.ts      app settings + install lifecycle
 ├── bench/
 │   └── run.ts               dependency-free perf harness (npm run bench)
@@ -285,7 +285,7 @@ appealdesk/
 │   ├── ARCHITECTURE.md      diagrams: layers, lifecycle, sequences, data model
 │   ├── THREAT_MODEL.md      STRIDE pass, trust boundaries, accepted risks
 │   └── BENCHMARKS.md        methodology, baseline, scaling characteristics
-└── test/                    197 tests, 100% coverage of core/ & ai/
+└── test/                    205 tests, 100% coverage of core/ & ai/
     ├── helpers/fakeRedis.ts in-memory Redis stand-in (with WATCH/MULTI/EXEC)
     ├── property/            fast-check invariant tests
     ├── concurrency/         parallel-write / race tests
@@ -304,7 +304,7 @@ Every key is constructed in `core/keys.ts`:
 | `index:<sub>:open` | sorted set | Open-queue appeal ids, scored by timestamp (paginated). |
 | `index:<sub>:purge` | sorted set | Resolved appeal ids scored by purge-eligibility time. |
 | `action:<sub>:<targetId>` | string | The appeal id currently open for an action (the per-action lock, claimed atomically). |
-| `action:<sub>:seed:<targetId>` | string (JSON) | Action snapshot stashed at removal/ban time for later appeal context. |
+| `actionseed:<sub>:<targetId>` | string (JSON) | Action snapshot stashed at removal/ban time for later appeal context. Its own key family (not under `action:`), cleared when the appeal resolves or is erased. |
 | `ratelimit:<sub>:<user>` | string (JSON) | Token-bucket state for per-user appeal rate limiting. |
 | `config:<sub>` | string (JSON) | The `SubredditConfig`. |
 
@@ -318,7 +318,7 @@ optimistic concurrency, and lifecycle `status`
 
 ```bash
 npm run build     # tsc --noEmit: type-checks the whole project incl. UI
-npm test          # vitest run: 197 tests
+npm test          # vitest run: 205 tests
 npm run test:watch
 npm run bench     # performance benchmarks (see docs/BENCHMARKS.md)
 npm run lint

@@ -207,6 +207,67 @@ describe('store: pagination', () => {
     expect(page.items.map((i) => i.id)).not.toContain('ap_corrupt');
     expect(metrics.counter('store.skip_corrupt')).toBeGreaterThanOrEqual(1);
   });
+
+  it('does not skip entries that share the same millisecond (Finding 2)', async () => {
+    // All five appeals created at the SAME clock value: identical scores. With
+    // a bare-score cursor (the old bug) the `cursor - 1` boundary dropped every
+    // other co-scored entry. Paging at limit=2 must still surface all five,
+    // each exactly once.
+    const { store } = makeStore();
+    await store.setConfig('aww', {
+      ...DEFAULT_CONFIG,
+      oneAppealPerAction: false,
+      rateLimitCapacity: 100,
+    });
+    const created = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const a = await store.create(input({ targetId: `t3_${i}` }));
+      created.add(a.id);
+    }
+
+    const seen: string[] = [];
+    let cursor = undefined as Awaited<ReturnType<typeof store.openQueuePage>>['nextCursor'];
+    // Bounded loop guard so a regression can't spin forever.
+    for (let guard = 0; guard < 10; guard++) {
+      const page = await store.openQueuePage('aww', 2, cursor ?? undefined);
+      seen.push(...page.items.map((i) => i.id));
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+
+    // Every appeal appears exactly once, none skipped, none duplicated.
+    expect(seen.slice().sort()).toEqual([...created].sort());
+    expect(new Set(seen).size).toBe(5);
+  });
+
+  it('reads only a bounded window from Redis per page, not the whole index (Finding 3)', async () => {
+    const { store, redis } = makeStore();
+    await store.setConfig('aww', {
+      ...DEFAULT_CONFIG,
+      oneAppealPerAction: false,
+      rateLimitCapacity: 1000,
+    });
+    for (let i = 0; i < 40; i++) {
+      await store.create(input({ targetId: `t3_${i}` }));
+    }
+
+    // Spy on the open-index zRange calls and capture the requested count.
+    const realZRange = redis.zRange.bind(redis);
+    const counts: number[] = [];
+    redis.zRange = (async (key, start, stop, options) => {
+      if (key === keys.openIndex('aww') && options?.limit) {
+        counts.push(options.limit.count);
+      }
+      return realZRange(key, start, stop, options);
+    }) as typeof redis.zRange;
+
+    const page = await store.openQueuePage('aww', 5);
+    expect(page.items).toHaveLength(5);
+    // The read was bounded to ~one page (limit + 1), NOT all 40 entries.
+    expect(counts.length).toBeGreaterThan(0);
+    for (const c of counts) expect(c).toBeLessThanOrEqual(6 + 5); // limit+1 (+ at most one overlap grow)
+    expect(Math.max(...counts)).toBeLessThan(40);
+  });
 });
 
 describe('store: lifecycle operations', () => {
@@ -240,6 +301,31 @@ describe('store: lifecycle operations', () => {
     await store.decide('aww', a.id, 'upheld', rec);
     const purged = await store.purgeExpired('aww');
     expect(purged).toHaveLength(0);
+  });
+
+  it('deletes the action snapshot when an appeal resolves (no leak)', async () => {
+    const { store, redis } = makeStore();
+    // Seed a snapshot the way the menu/trigger would.
+    await redis.set(
+      keys.actionSeed('aww', 't2_alice'),
+      JSON.stringify({ actionType: 'ban', originalContent: 'x', originalReason: 'y' }),
+    );
+    const a = await store.create(input());
+    expect(await redis.get(keys.actionSeed('aww', 't2_alice'))).toBeDefined();
+    await store.decide('aww', a.id, 'upheld', rec);
+    // Resolution clears the snapshot alongside the action lock.
+    expect(await redis.get(keys.actionSeed('aww', 't2_alice'))).toBeUndefined();
+  });
+
+  it('deletes the action snapshot on erasure (PII residual)', async () => {
+    const { store, redis } = makeStore();
+    await redis.set(
+      keys.actionSeed('aww', 't2_alice'),
+      JSON.stringify({ actionType: 'ban', originalContent: 'sensitive', originalReason: 'y' }),
+    );
+    const a = await store.create(input());
+    await store.redactAppeal('aww', a.id);
+    expect(await redis.get(keys.actionSeed('aww', 't2_alice'))).toBeUndefined();
   });
 });
 

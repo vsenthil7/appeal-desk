@@ -10,7 +10,7 @@ import { Devvit } from '@devvit/public-api';
 import type { TriggerContext } from '@devvit/public-api';
 import { AppealStore } from './context.js';
 import { DEFAULT_CONFIG, type AppealDecision } from '../core/types.js';
-import { SLA_NUDGE_JOB } from './scheduler.js';
+import { SLA_NUDGE_JOB, RETENTION_PURGE_JOB } from './scheduler.js';
 
 Devvit.addSettings([
   {
@@ -73,8 +73,9 @@ Devvit.addSettings([
 
 /**
  * Sync the editable settings into our persisted SubredditConfig. Called on
- * install and whenever an appeal is created (cheap, keeps config fresh without
- * a settings-change webhook).
+ * install, on upgrade, and on every appeal submission (see intake.ts) so a
+ * mod's settings changes take effect without reinstalling — cheap, and avoids
+ * needing a dedicated settings-change webhook.
  */
 export async function syncConfigFromSettings(
   context: TriggerContext,
@@ -117,14 +118,35 @@ export async function syncConfigFromSettings(
   });
 }
 
-/** On install: seed config and schedule the SLA nudge (every 6 hours). */
+/**
+ * Install / upgrade lifecycle. On both we (re)seed config from settings and
+ * (re)install the recurring cron jobs: the SLA nudge AND the retention purge.
+ * Re-running on upgrade is safe — `runJob` with the same name replaces the
+ * existing schedule rather than stacking duplicates — and it's the mechanism by
+ * which a settings change picked up at upgrade time takes effect.
+ */
+async function onInstallOrUpgrade(context: TriggerContext): Promise<void> {
+  await syncConfigFromSettings(context);
+  await context.scheduler.runJob({
+    name: SLA_NUDGE_JOB,
+    cron: '0 */6 * * *', // every 6 hours
+  });
+  await context.scheduler.runJob({
+    name: RETENTION_PURGE_JOB,
+    cron: '0 3 * * *', // daily at 03:00
+  });
+}
+
 Devvit.addTrigger({
   event: 'AppInstall',
   onEvent: async (_event, context) => {
-    await syncConfigFromSettings(context);
-    await context.scheduler.runJob({
-      name: SLA_NUDGE_JOB,
-      cron: '0 */6 * * *', // every 6 hours
-    });
+    await onInstallOrUpgrade(context);
+  },
+});
+
+Devvit.addTrigger({
+  event: 'AppUpgrade',
+  onEvent: async (_event, context) => {
+    await onInstallOrUpgrade(context);
   },
 });

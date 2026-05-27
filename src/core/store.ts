@@ -67,11 +67,21 @@ export interface NewAppealInput {
   permalink?: string;
 }
 
+/**
+ * An opaque pagination cursor. It carries both the score (timestamp) AND the
+ * member id of the last item on a page, so paging can break ties on member id
+ * instead of skipping co-scored entries (see `openQueuePage`).
+ */
+export interface QueueCursor {
+  score: number;
+  id: string;
+}
+
 /** A page of results plus an opaque cursor for the next page. */
 export interface Page<T> {
   items: T[];
   /** Pass back as `cursor` to fetch the next page; null when exhausted. */
-  nextCursor: number | null;
+  nextCursor: QueueCursor | null;
 }
 
 /** How many CAS attempts before we give up and surface the conflict. */
@@ -231,35 +241,86 @@ export class AppealStore {
   }
 
   /**
-   * Paginated open queue, newest first. `cursor` is the score (timestamp) to
-   * read strictly below; omit for the first page. Dangling/corrupt entries are
-   * skipped without failing the page.
+   * Paginated open queue, newest first.
+   *
+   * The open index is a sorted set ordered by score (creation timestamp) and,
+   * for equal scores, by member id. Reading it reversed therefore yields a total
+   * order of (descending score, descending id) with no ambiguity even when many
+   * appeals share the same millisecond.
+   *
+   * Two correctness properties this method guarantees:
+   *
+   *   1. **Bounded Redis read.** We ask Redis for only `limit + 1 + overlap`
+   *      members via the `limit` option, NOT the entire `[0, cursor]` score
+   *      range. So a busy sub with a huge backlog still transfers ~one page per
+   *      call instead of the whole index. (Previously the range was unbounded and
+   *      sliced in memory — "paginated" in name only.)
+   *
+   *   2. **Tie-safe cursor.** The cursor is `{score, id}`, not a bare score.
+   *      Paging continues strictly *after* that (score, id) position in the total
+   *      order, so a page boundary that lands inside a group of same-millisecond
+   *      entries no longer skips the co-scored neighbours. (A bare `score - 1`
+   *      cursor used to drop every other entry sharing that exact millisecond.)
+   *
+   * `overlap` covers same-score entries at the cursor boundary that must be read
+   * and then dropped; it grows only if a tie group is larger than one page, which
+   * we handle by reading more. Dangling/corrupt records are skipped without
+   * failing the page.
    */
   async openQueuePage(
     sub: string,
     limit = 25,
-    cursor?: number,
+    cursor?: QueueCursor,
   ): Promise<Page<AppealSummary>> {
     return time(this.tel.metrics, this.tel.clock, 'store.openQueuePage', async () => {
-      const max = cursor !== undefined ? cursor - 1 : Number.MAX_SAFE_INTEGER;
-      // zRange by score, descending, bounded by the cursor.
-      const entries = await this.redis.zRange(
-        keys.openIndex(sub),
-        0,
-        max,
-        { by: 'score', reverse: true },
-      );
-      const slice = entries.slice(0, limit);
-      const appeals = await Promise.all(
-        slice.map((e) => this.safeGet(sub, e.member)),
-      );
-      const items = appeals
-        .filter((a): a is Appeal => a !== null)
-        .map(summarise);
-      const last = slice[slice.length - 1];
-      const nextCursor =
-        entries.length > limit && last ? last.score : null;
-      return { items, nextCursor };
+      // Upper score bound: at or below the cursor's score (ties handled below).
+      const maxScore = cursor !== undefined ? cursor.score : Number.MAX_SAFE_INTEGER;
+
+      // Read a bounded window, growing it only if the cursor's tie group is so
+      // large that the entries we must drop would otherwise eat the whole page.
+      let overlap = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const want = limit + 1 + overlap;
+        const entries = await this.redis.zRange(keys.openIndex(sub), 0, maxScore, {
+          by: 'score',
+          reverse: true,
+          limit: { offset: 0, count: want },
+        });
+
+        // Drop everything at or "before" the cursor in the (desc score, desc id)
+        // total order — i.e. higher score, or equal score with an id that sorts
+        // at-or-after the cursor id under the same reversed ordering.
+        const afterCursor = cursor
+          ? entries.filter((e) => isAfterCursor(e, cursor))
+          : entries;
+
+        // If we fetched fewer than we asked for, Redis is exhausted: this is the
+        // last window, no need to grow.
+        const exhausted = entries.length < want;
+
+        // If trimming the tie boundary left us short of a full page AND there
+        // were more entries to read, widen the window and retry. Bounded: only
+        // triggers when a single millisecond holds > one page of appeals.
+        if (!exhausted && afterCursor.length < limit + 1) {
+          overlap += limit;
+          continue;
+        }
+
+        const slice = afterCursor.slice(0, limit);
+        const appeals = await Promise.all(
+          slice.map((e) => this.safeGet(sub, e.member)),
+        );
+        const items = appeals
+          .filter((a): a is Appeal => a !== null)
+          .map(summarise);
+
+        const hasMore = afterCursor.length > limit;
+        const last = slice[slice.length - 1];
+        const nextCursor =
+          hasMore && last ? { score: last.score, id: last.member } : null;
+        return { items, nextCursor };
+      }
     });
   }
 
@@ -526,6 +587,10 @@ export class AppealStore {
     if (!isInOpenQueue(updated.status)) {
       await this.redis.zRem(keys.openIndex(sub), [id]);
       await this.rawDel(keys.actionLock(sub, updated.targetId));
+      // The action snapshot is only needed while an appeal is in flight; once
+      // the action is resolved it serves no purpose and would otherwise leak
+      // forever. Drop it alongside the lock.
+      await this.rawDel(keys.actionSeed(sub, updated.targetId));
       // Schedule for retention purge.
       const config = await this.getConfig(sub);
       const at = purgeEligibleAt(updated, config.retentionDays);
@@ -565,20 +630,26 @@ export class AppealStore {
       if (isRedacted(appeal)) return null; // already done
       return redactForErasure(appeal, now);
     });
+    // The action snapshot can contain the original content / removal context;
+    // erasure must scrub it too, not just the appeal record's free text.
+    await this.rawDel(keys.actionSeed(sub, result.targetId));
     this.tel.metrics.increment('appeal.redacted', 1, { sub });
     return result;
   }
 
   /**
    * Purge appeals whose retention window has elapsed. Returns the ids purged.
-   * Walks the purge index for entries scored at or before `now`.
+   * Walks the purge index for entries scored at or before `now`, reading only up
+   * to `limit` due members at the Redis layer (bounded read, symmetric with
+   * `openQueuePage` — previously this pulled every due entry then sliced).
    */
   async purgeExpired(sub: string, limit = 100): Promise<string[]> {
     const now = this.now();
     const due = await this.redis.zRange(keys.purgeIndex(sub), 0, now, {
       by: 'score',
+      limit: { offset: 0, count: limit },
     });
-    const ids = due.slice(0, limit).map((e) => e.member);
+    const ids = due.map((e) => e.member);
     for (const id of ids) {
       const appeal = await this.safeGet(sub, id);
       await this.rawDel(keys.appeal(sub, id));
@@ -613,6 +684,21 @@ export function summarise(a: Appeal): AppealSummary {
     repeatCount: a.triage.repeatCount,
     createdAt: a.createdAt,
   };
+}
+
+/**
+ * Does this index entry fall strictly *after* `cursor` in the open queue's
+ * (descending score, descending member id) ordering — i.e. does it belong on a
+ * later page? True when the score is lower, or the score ties and the member id
+ * sorts before the cursor id (reversed order ⇒ smaller id comes later). This is
+ * what makes pagination tie-safe across same-millisecond entries.
+ */
+function isAfterCursor(
+  entry: { member: string; score: number },
+  cursor: QueueCursor,
+): boolean {
+  if (entry.score !== cursor.score) return entry.score < cursor.score;
+  return entry.member < cursor.id;
 }
 
 /** Deep clone that works without structuredClone (Node < 17 / some runtimes). */

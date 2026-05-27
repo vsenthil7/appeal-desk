@@ -22,6 +22,12 @@ export interface ZMember {
 export interface ZRangeOptions {
   reverse?: boolean;
   by?: 'rank' | 'score' | 'lex';
+  /**
+   * Bound the number of members returned at the Redis layer (not just sliced in
+   * memory). Mirrors Devvit's real `zRange` option of the same shape, so a
+   * caller can fetch only the page it needs instead of the whole range.
+   */
+  limit?: { offset: number; count: number };
 }
 
 /** A queued transaction. Commands return the txn for chaining; exec runs them. */

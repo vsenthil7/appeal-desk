@@ -7,7 +7,16 @@ describe('keys', () => {
     expect(keys.history('aww', 'alice')).toBe('history:aww:alice');
     expect(keys.openIndex('aww')).toBe('index:aww:open');
     expect(keys.actionLock('aww', 't3_x')).toBe('action:aww:t3_x');
+    expect(keys.actionSeed('aww', 't3_x')).toBe('actionseed:aww:t3_x');
     expect(keys.config('aww')).toBe('config:aww');
+  });
+
+  it('keeps the action lock and action seed in distinct namespaces', () => {
+    // Regression for the snapshot/lock collision (Finding 4): the seed key must
+    // NOT live under the `action:` prefix, even for a targetId that itself
+    // starts with `seed:`.
+    expect(keys.actionSeed('aww', 't3_x')).not.toBe(keys.actionLock('aww', 't3_x'));
+    expect(keys.actionLock('aww', 'seed:t3_x')).not.toBe(keys.actionSeed('aww', 't3_x'));
   });
 });
 

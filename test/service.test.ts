@@ -4,6 +4,7 @@ import { AppealStore } from '../src/core/store.js';
 import { AppealService, type RedditGateway } from '../src/core/service.js';
 import { DEFAULT_CONFIG } from '../src/core/types.js';
 import { NoopAiProvider, ModelAiProvider } from '../src/ai/provider.js';
+import { FakeClock, MemoryMetrics, MemoryLogger } from '../src/core/observability/index.js';
 
 interface SentReply {
   subreddit: string;
@@ -250,5 +251,59 @@ describe('AppealService.queuePage', () => {
     const page = await service.queuePage('aww', 10);
     expect(page.items).toHaveLength(1);
     expect(page.nextCursor).toBeNull();
+  });
+});
+
+describe('AppealService lifecycle (retention & erasure)', () => {
+  const decisionInput = (appealId: string) => ({
+    subreddit: 'aww',
+    appealId,
+    decision: 'upheld' as const,
+    modId: 'm1',
+    modName: 'mod',
+    note: 'reviewed',
+    finalReply: 'Thanks for appealing; the action stands.',
+  });
+
+  it('eraseAppeal redacts free text and is idempotent', async () => {
+    const store = new AppealStore(new FakeRedis() as never);
+    const service = new AppealService(store, new FakeGateway(), new NoopAiProvider());
+    const a = await service.submitAppeal(baseInput);
+    const redacted = await service.eraseAppeal('aww', a!.id);
+    expect(redacted.authorName).toBe('[redacted]');
+    const again = await service.eraseAppeal('aww', a!.id);
+    expect(again.version).toBe(redacted.version); // no further bump
+  });
+
+  it('eraseUser redacts every appeal in the user history', async () => {
+    const store = new AppealStore(new FakeRedis() as never);
+    await store.setConfig('aww', { ...DEFAULT_CONFIG, oneAppealPerAction: false });
+    const service = new AppealService(store, new FakeGateway(), new NoopAiProvider());
+    const a1 = await service.submitAppeal({ ...baseInput, targetId: 't3_1' });
+    const a2 = await service.submitAppeal({ ...baseInput, targetId: 't3_2' });
+    const ids = await service.eraseUser('aww', 'alice');
+    expect(ids.sort()).toEqual([a1!.id, a2!.id].sort());
+    for (const id of ids) {
+      expect((await store.get('aww', id))!.reason).toBe('[redacted]');
+    }
+  });
+
+  it('purgeRetention deletes resolved appeals past their window', async () => {
+    const clock = new FakeClock(1_000_000);
+    const store = new AppealStore(new FakeRedis() as never, {
+      clock,
+      metrics: new MemoryMetrics(),
+      logger: new MemoryLogger(),
+    });
+    const service = new AppealService(store, new FakeGateway(), new NoopAiProvider());
+    const a = await service.submitAppeal(baseInput);
+    await service.decide(decisionInput(a!.id));
+    // Nothing due yet.
+    expect(await service.purgeRetention('aww')).toHaveLength(0);
+    // Advance past the retention window.
+    clock.advance(DEFAULT_CONFIG.retentionDays * 24 * 60 * 60 * 1000 + 1000);
+    const purged = await service.purgeRetention('aww');
+    expect(purged).toContain(a!.id);
+    expect(await store.get('aww', a!.id)).toBeNull();
   });
 });

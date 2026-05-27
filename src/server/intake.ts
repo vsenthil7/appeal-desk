@@ -14,6 +14,7 @@
 
 import { Devvit } from '@devvit/public-api';
 import { makeService } from './context.js';
+import { syncConfigFromSettings } from './settings.js';
 import { keys } from '../core/keys.js';
 import { isAppealError } from '../core/errors/index.js';
 import type { ActionType } from '../core/types.js';
@@ -84,11 +85,23 @@ export const intakeForm = Devvit.createForm(
     };
     try {
       const raw = await context.redis.get(
-        keys.actionLock(subreddit, `seed:${targetId}`),
+        keys.actionSeed(subreddit, targetId),
       );
       if (raw) snapshot = { ...snapshot, ...(JSON.parse(raw) as ActionSnapshot) };
     } catch {
       // Non-fatal — placeholders are fine; the appeal still works.
+    }
+
+    // Refresh persisted config from the live settings panel. Previously this
+    // sync ran ONLY on AppInstall, so any setting a mod changed afterwards (SLA
+    // window, rate limits, templates, AI toggle) was silently ignored until the
+    // app was reinstalled. Doing it here keeps config fresh on every appeal,
+    // which is exactly what this function's own docstring always claimed.
+    // Best-effort: a settings read hiccup must never block a legitimate appeal.
+    try {
+      await syncConfigFromSettings(context);
+    } catch {
+      // Non-fatal — fall back to whatever config is already persisted.
     }
 
     const service = makeService(context);

@@ -7,6 +7,7 @@
  *   history:<sub>:<user>     -> a Redis sorted set of appeal ids (score = ts)
  *   index:<sub>:open         -> a sorted set of open appeal ids (score = ts)
  *   action:<sub>:<targetId>  -> the appeal id currently open for an action
+ *   actionseed:<sub>:<targetId> -> the action snapshot stashed at action time
  *   config:<sub>             -> the SubredditConfig (JSON)
  */
 
@@ -15,6 +16,16 @@ export const keys = {
   history: (sub: string, user: string) => `history:${sub}:${user}`,
   openIndex: (sub: string) => `index:${sub}:open`,
   actionLock: (sub: string, targetId: string) => `action:${sub}:${targetId}`,
+  /**
+   * The action snapshot ("seed") captured at mod-action time and read back when
+   * the user submits an appeal. This is a DISTINCT key family from `actionLock`:
+   * previously three call sites built it as `actionLock(sub, 'seed:' + targetId)`,
+   * which (a) bypassed this single-source-of-truth module and (b) shared the
+   * `action:` namespace with the per-action lock, so a `targetId` that itself
+   * began with `seed:` could collide with a real lock. Giving it its own prefix
+   * removes that collision entirely.
+   */
+  actionSeed: (sub: string, targetId: string) => `actionseed:${sub}:${targetId}`,
   config: (sub: string) => `config:${sub}`,
   /** Token-bucket state for per-user appeal rate limiting. */
   rateLimit: (sub: string, user: string) => `ratelimit:${sub}:${user}`,

@@ -21,7 +21,11 @@ interface ZEntry {
   score: number;
 }
 
-type ZRangeOpts = { reverse?: boolean; by?: 'rank' | 'score' | 'lex' };
+type ZRangeOpts = {
+  reverse?: boolean;
+  by?: 'rank' | 'score' | 'lex';
+  limit?: { offset: number; count: number };
+};
 
 export class FakeRedis {
   private kv = new Map<string, string>();
@@ -100,19 +104,34 @@ export class FakeRedis {
   ): Promise<ZEntry[]> {
     const set = this.zsets.get(key);
     if (!set) return [];
+    // Real Redis orders ties by member byte/codepoint order, which JS `<`/`>`
+    // reproduce (localeCompare does NOT — it is case-folding/locale-aware). The
+    // store's cursor tie-break relies on this exact ordering, so we match it.
     let sorted = [...set.entries()]
       .map(([member, score]) => ({ member, score }))
-      .sort((a, b) => a.score - b.score || a.member.localeCompare(b.member));
+      .sort((a, b) =>
+        a.score - b.score || (a.member < b.member ? -1 : a.member > b.member ? 1 : 0),
+      );
 
+    let result: ZEntry[];
     if (options?.by === 'score') {
       let inRange = sorted.filter((e) => e.score >= start && e.score <= stop);
       if (options.reverse) inRange = inRange.reverse();
-      return inRange;
+      result = inRange;
+    } else {
+      if (options?.reverse) sorted = sorted.reverse();
+      const end = stop === -1 ? sorted.length - 1 : stop;
+      result = sorted.slice(start, end + 1);
     }
 
-    if (options?.reverse) sorted = sorted.reverse();
-    const end = stop === -1 ? sorted.length - 1 : stop;
-    return sorted.slice(start, end + 1);
+    // Apply the LIMIT offset/count window AFTER range selection + ordering,
+    // exactly as Redis does. This is what makes a "bounded read" actually
+    // bounded rather than sliced in memory by the caller.
+    if (options?.limit) {
+      const { offset, count } = options.limit;
+      result = result.slice(offset, count < 0 ? undefined : offset + count);
+    }
+    return result;
   }
 
   async watch(...keys: string[]): Promise<FakeTx> {
