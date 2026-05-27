@@ -12,6 +12,20 @@
  * implementation AND a no-op fallback. When `aiEnabled` is false (or no model
  * is wired up), callers transparently get the no-op, which returns nothing /
  * the original text. Nothing downstream changes behaviour.
+ *
+ * Prompt-injection hardening (D7): the user's `reason` and the draft reply
+ * are wrapped in triple-quoted blocks. To prevent a payload from escaping the
+ * quoting (e.g. `"""\n IGNORE PRIOR INSTRUCTIONS:...\n"""`), `escapeQuoted`
+ * folds any embedded triple-quotes to a single quote before interpolation.
+ * That isn't a complete defence against a determined adversarial prompt, but
+ * it closes the trivial escape; the THREAT_MODEL notes the blast radius
+ * here is "a mod sees a misleading hint," which the deterministic dedup
+ * signal already shadows.
+ *
+ * Per-sub backend selector (D7): `selectProvider` now considers
+ * `config.aiBackend`. When set to `noop`, the no-op fallback is returned even
+ * if a real backend is wired; that lets a sub disable AI on the fly without
+ * the host needing to un-wire its provider.
  */
 
 import type { Appeal } from '../core/types.js';
@@ -79,13 +93,40 @@ export class ModelAiProvider implements AiProvider {
   }
 }
 
-/** Pick the right provider given the sub's setting and an optional backend. */
+/** Pick the right provider given the sub's setting and an optional backend.
+ *  Honours `aiBackend === 'noop'` as an explicit kill switch (D7). */
 export function selectProvider(
   aiEnabled: boolean,
   backend?: AiProvider,
+  aiBackend?: string,
 ): AiProvider {
-  if (aiEnabled && backend) return backend;
-  return new NoopAiProvider();
+  if (!aiEnabled || !backend) return new NoopAiProvider();
+  if (aiBackend === 'noop') return new NoopAiProvider();
+  return backend;
+}
+
+/**
+ * Apply the configured confidence floor to a triage result (D7). Returns
+ * `null` for sub-threshold labels so the dashboard hides the low-signal hint
+ * instead of cluttering the UI. `floor === 0` is the back-compat default.
+ */
+export function applyConfidenceFloor(
+  result: AiTriageResult | null,
+  floor: number,
+): AiTriageResult | null {
+  if (!result) return null;
+  if (floor <= 0) return result;
+  return result.confidence >= floor ? result : null;
+}
+
+/**
+ * Escape triple-double-quotes in an interpolated string so a payload can't
+ * close the quoted block in a prompt (D7). Replaces `"""` with `'''` — both
+ * delimiters are commonly understood as "verbatim" by modern instruct models,
+ * so the semantics are preserved and an injection can't escape the quoting.
+ */
+export function escapeQuoted(s: string): string {
+  return s.replace(/"""/g, "'''");
 }
 
 // ---- prompt construction & parsing (pure, testable) --------------------
@@ -102,9 +143,9 @@ export function buildTriagePrompt(appeal: Appeal): string {
     `Deterministic duplicate match: ${
       appeal.triage.duplicateOfAppealId ? 'yes' : 'no'
     }`,
-    `Original removal reason: ${appeal.originalReason}`,
+    `Original removal reason: ${escapeQuoted(appeal.originalReason)}`,
     `User acknowledged the rule: ${appeal.acknowledged ? 'yes' : 'no'}`,
-    `Appeal text: """${appeal.reason}"""`,
+    `Appeal text: """${escapeQuoted(appeal.reason)}"""`,
   ].join('\n');
 }
 
@@ -115,7 +156,7 @@ export function buildSoftenPrompt(draft: string, appeal: Appeal): string {
     'Do not invent facts. Output only the rewritten reply, no preamble.',
     '',
     `Decision context (action: ${appeal.actionType}).`,
-    `Reply to rewrite: """${draft}"""`,
+    `Reply to rewrite: """${escapeQuoted(draft)}"""`,
   ].join('\n');
 }
 

@@ -406,3 +406,26 @@ This codebase is built to run for real users, so it goes beyond a hackathon MVP:
 - **Mod-reviewed replies, always.** Even AI-softened replies pass through a confirm
   form the mod edits and approves; nothing is auto-sent in the user's name.
 ```
+
+## Engineering notes
+
+Two appendices track the review-driven refactors so a reviewer can follow how
+the codebase moved between major passes:
+
+- [`CODE-FIX-NOTES.md`](./CODE-FIX-NOTES.md) — first review pass: the original
+  set of fixes (storage round-trips, lock semantics, retention rooting, etc).
+- [`CODE-FIX-NOTES-2.md`](./CODE-FIX-NOTES-2.md) — second review pass: H1/H2
+  snapshot & rate-limit lifecycle, M1/M2 CAS guards and typed contention, D1
+  paraphrase signal, D2 tx batching, D6 retention sweeps, D7 prompt-injection
+  hardening, D8 audit chain, W1 mod erasure surface, W2 analytics, W3 policy
+  predicates, W4 claims + Notifier, M3 pagination, plus the supporting UI and
+  test work.
+
+Operations docs:
+
+- [`docs/RUNBOOK.md`](./docs/RUNBOOK.md) — metrics interpretation, alarming
+  signals, manual sweep / erasure / chain-verify commands, recovery from
+  `DATA_CORRUPTION`, scheduler drain procedures.
+- [`docs/SCREENSHOTS.md`](./docs/SCREENSHOTS.md) — placeholder slots for
+  dashboard, detail, analytics tab, intake form, and erasure form
+  screenshots; populate when running a fresh install.

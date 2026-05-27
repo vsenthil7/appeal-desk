@@ -32,5 +32,6 @@ import './server/menu.js';
 import './server/triggers.js';
 import './server/scheduler.js';
 import './server/settings.js';
+import './server/eraseForm.js';
 
 export default Devvit;

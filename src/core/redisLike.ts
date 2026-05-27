@@ -30,10 +30,25 @@ export interface ZRangeOptions {
   limit?: { offset: number; count: number };
 }
 
+/**
+ * Options for `set`. Devvit's RedisClient exposes `expiration: Date` — an
+ * ABSOLUTE expiry instant, not a duration. We mirror that so this interface
+ * is structurally satisfied by the real Devvit client without an adapter.
+ * Used by H1 (snapshot TTL), H2 (rate-limit bucket TTL), and W4 (claim TTL).
+ */
+export interface SetOptions {
+  /** Absolute time at which the key should auto-delete. */
+  expiration?: Date;
+}
+
 /** A queued transaction. Commands return the txn for chaining; exec runs them. */
 export interface RedisTx {
-  set(key: string, value: string): Promise<RedisTx>;
+  set(key: string, value: string, options?: SetOptions): Promise<RedisTx>;
   del(...keys: string[]): Promise<RedisTx>;
+  /** Atomic sorted-set remove inside the transaction (D2 tx batching). */
+  zRem(key: string, members: string[]): Promise<RedisTx>;
+  /** Atomic sorted-set add inside the transaction (D2 tx batching). */
+  zAdd(key: string, ...members: ZMember[]): Promise<RedisTx>;
   multi(): Promise<void>;
   /** Resolves to an array of replies, or null if the transaction was aborted
    *  because a watched key changed. */
@@ -42,8 +57,11 @@ export interface RedisTx {
 
 export interface RedisLike {
   get(key: string): Promise<string | undefined>;
-  set(key: string, value: string): Promise<string | void>;
+  set(key: string, value: string, options?: SetOptions): Promise<string | void>;
   del(...keys: string[]): Promise<number | void>;
+  /** Set a TTL on an existing key. Optional — call sites that know their TTL
+   *  up front pass it to `set` directly. Devvit's RedisClient exposes `expire`. */
+  expire?(key: string, seconds: number): Promise<void>;
   zAdd(key: string, ...members: ZMember[]): Promise<number>;
   zRem(key: string, members: string[]): Promise<number>;
   zCard(key: string): Promise<number>;

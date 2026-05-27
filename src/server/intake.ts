@@ -138,6 +138,14 @@ function messageForError(e: unknown): string {
         return 'You already have an open appeal for this action.';
       case 'RATE_LIMITED':
         return 'You have appealed too many times recently. Please try later.';
+      case 'APPEAL_INELIGIBLE':
+        // The policy module supplies a human-readable reason; surface it.
+        return typeof e.message === 'string' && e.message.length > 0
+          ? e.message
+          : 'This appeal is not currently eligible. Please review the community rules.';
+      case 'OPTIMISTIC_LOCK_CONFLICT':
+        // Retryable: a parallel writer was active. Tell the user to retry.
+        return 'Your appeal could not be submitted just now — please try again.';
       case 'VALIDATION_FAILED':
         return 'Please check your appeal — the reason looks too short or invalid.';
       case 'STORAGE_UNAVAILABLE':

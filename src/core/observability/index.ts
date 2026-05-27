@@ -104,6 +104,16 @@ interface MetricEvent {
 export class MemoryMetrics implements Metrics {
   readonly events: MetricEvent[] = [];
 
+  /**
+   * Per-metric-name timing histogram (D4). We keep raw samples (the event list
+   * already does) AND a lightweight linear-bucket counter so percentile reads
+   * are O(buckets), not O(samples). Buckets are 1ms-resolution up to 100ms,
+   * then 10ms up to 1s, then 100ms up to 10s — plus an overflow bucket. This
+   * is plenty of resolution for the operations we time (Redis ops, page
+   * fetches) and trivial to forward to StatsD/CloudWatch with a sink hook.
+   */
+  private readonly histograms = new Map<string, number[]>();
+
   increment(name: string, value = 1, tags: Record<string, string> = {}): void {
     this.events.push({ type: 'increment', name, value, tags });
   }
@@ -112,6 +122,14 @@ export class MemoryMetrics implements Metrics {
   }
   timing(name: string, ms: number, tags: Record<string, string> = {}): void {
     this.events.push({ type: 'timing', name, value: ms, tags });
+    const bucket = bucketIndex(ms);
+    let buckets = this.histograms.get(name);
+    if (!buckets) {
+      buckets = new Array(HISTOGRAM_BUCKETS.length).fill(0) as number[];
+      this.histograms.set(name, buckets);
+    }
+    /* v8 ignore next */
+    buckets[bucket] = (buckets[bucket] ?? 0) + 1;
   }
 
   /** Sum of a counter across all matching events. */
@@ -125,6 +143,54 @@ export class MemoryMetrics implements Metrics {
   named(name: string): MetricEvent[] {
     return this.events.filter((e) => e.name === name);
   }
+
+  /** Total number of timing samples recorded for a metric. */
+  histogramCount(name: string): number {
+    const buckets = this.histograms.get(name);
+    if (!buckets) return 0;
+    return buckets.reduce((sum, n) => sum + n, 0);
+  }
+
+  /**
+   * Percentile (0..100) of a timing metric, computed from the histogram. Returns
+   * the lower edge of the bucket containing the requested quantile, which is
+   * what production monitoring systems return. Returns `null` for an unsampled
+   * metric so SLO assertions can distinguish "no data" from "p99 is 0ms".
+   */
+  percentile(name: string, p: number): number | null {
+    const buckets = this.histograms.get(name);
+    if (!buckets) return null;
+    const total = this.histogramCount(name);
+    if (total === 0) return null;
+    const target = Math.ceil((p / 100) * total);
+    let cumulative = 0;
+    for (let i = 0; i < buckets.length; i++) {
+      cumulative += buckets[i] ?? 0;
+      if (cumulative >= target) return HISTOGRAM_BUCKETS[i] ?? Infinity;
+    }
+    return HISTOGRAM_BUCKETS[HISTOGRAM_BUCKETS.length - 1] ?? Infinity;
+  }
+}
+
+/**
+ * Lower edges of the histogram buckets, in ms. Linear at 1ms up to 100,
+ * 10ms up to 1s, 100ms up to 10s, then an overflow bucket at 10s+.
+ */
+const HISTOGRAM_BUCKETS: ReadonlyArray<number> = (() => {
+  const buckets: number[] = [];
+  for (let i = 0; i < 100; i++) buckets.push(i);
+  for (let i = 100; i < 1000; i += 10) buckets.push(i);
+  for (let i = 1000; i < 10_000; i += 100) buckets.push(i);
+  buckets.push(10_000);
+  return buckets;
+})();
+
+function bucketIndex(ms: number): number {
+  if (ms < 0 || Number.isNaN(ms)) return 0;
+  if (ms >= 10_000) return HISTOGRAM_BUCKETS.length - 1;
+  if (ms < 100) return Math.floor(ms);
+  if (ms < 1000) return 100 + Math.floor((ms - 100) / 10);
+  return 100 + 90 + Math.floor((ms - 1000) / 100);
 }
 
 /**

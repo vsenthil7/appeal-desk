@@ -82,9 +82,15 @@ words from misuse, (4) keep the queue available and fair.**
   appends an immutable record to an append-only audit trail (decision, mod id,
   mod name, note, the exact reply sent, timestamp). The trail is never mutated,
   only appended.
-- *Accepted risk:* the audit trail lives in Redis and is not independently
-  signed or exported to a write-once store. For higher assurance, a deployment
-  could mirror decision events to an append-only external log. Deferred.
+- **Tamper-evident chain (D8).** Each `DecisionRecord` now carries a
+  `chainHash = sha256(prevChainHash + canonicalize(record))`. The
+  `verifyChain(appeal)` helper recomputes every hash so an export can prove
+  no record was silently edited. Storage stays in Redis; the chain adds
+  zero new keys.
+- *Accepted risk:* the audit trail still lives in Redis and is not exported
+  to an external write-once store. The chain closes "in-place tampering";
+  it does not close "the whole record was deleted." For higher assurance a
+  deployment could mirror decision events to an append-only external log.
 
 ### Information disclosure — "leaking data"
 - **A user's appeal text leaks to other users.** *Mitigation:* appeals are
@@ -94,30 +100,69 @@ words from misuse, (4) keep the queue available and fair.**
   the original context is shown only to the mod; it is stashed in Redis at
   action time and read back on submit, never placed in a field the user sees or
   can alter.
+- **Snapshot lifecycle (H1).** Action snapshots stored at mod-action time
+  (`actionseed:<sub>:<targetId>`) carry post/comment bodies — they are the
+  highest-risk PII the app handles. Snapshots are now written with an
+  absolute TTL based on `config.snapshotRetentionHours` AND tracked in
+  `index:<sub>:snapshot_purge` so the daily `SNAPSHOT_PURGE_JOB` sweeps any
+  that survived TTL drift. Unappealed snapshots no longer live forever.
+- **Rate-limit username persistence (H2).** Idle rate-limit buckets
+  (`ratelimit:<sub>:<user>`) carry the user's username in the key. They now
+  carry a TTL and a parallel `index:<sub>:ratelimit_purge` sweep; on
+  `eraseUser` the bucket is deleted directly. THREAT_MODEL §6 invariant 6
+  (redacted users do not survive in the rate-limit namespace) is now strictly
+  honoured.
 - **Right-to-erasure.** *Mitigation:* `redactAppeal` scrubs the author name,
   reason, original content, permalink, and free-text notes/replies while keeping
   a structural tombstone (status, decision types, counts, timestamps) so
-  moderation history stays auditable without retaining the user's words.
+  moderation history stays auditable without retaining the user's words. The
+  redactable-field list lives in `REDACTABLE_TOP_LEVEL_STRING_FIELDS` and
+  `REDACTABLE_DECISION_FIELDS` (Finding B) so a new sensitive field can't be
+  added to `Appeal` without the type system reminding the implementer to
+  redact it.
+- **Mod-driven erasure surface (W1).** `eraseUserByMod` records the acting
+  mod in `index:<sub>:erasure_log` — a separate audit trail so a transparency
+  report can answer "who erased what" without storing the acting mod inside
+  the redacted appeal (which would defeat the redaction).
 - *Accepted risk:* Appealdesk does not encrypt data at rest beyond what Devvit
   KV provides; it relies on the platform's storage security.
 
 ### Denial of service — "exhausting or blocking the system"
 - **A user floods the queue with appeals.** *Mitigation:* a per-user
   token-bucket rate limiter (configurable capacity + refill), enforced at
-  intake; over-limit submissions get `RATE_LIMITED` with a retry hint.
+  intake; over-limit submissions get `RATE_LIMITED` with a retry hint. The
+  rate-limit consume is now **CAS-guarded** (M1) so two parallel intakes from
+  the same user against different targets can't both spend the same token.
+- **Coordinated-cohort DoS (D3).** When `subwideRateLimitCapacity > 0`, a
+  sub-wide token bucket per `actionType` gates the global rate before the
+  per-user bucket is even consulted — a botnet of fresh accounts can't pierce
+  the per-user limit by spreading load.
 - **Duplicate-appeal spam wears mods down.** *Mitigation:* deterministic
   duplicate/repeat detection flags re-files; the one-appeal-per-action lock
-  prevents stacking open appeals on the same action.
+  prevents stacking open appeals on the same action. The lock claim now
+  distinguishes confirmed-holder (`DUPLICATE_OPEN_APPEAL`, non-retryable)
+  from exhausted-CAS-retries (`OPTIMISTIC_LOCK_CONFLICT`, retryable) (M2);
+  the user sees an honest message in each case.
+- **Paraphrase spam (D1).** A second deterministic signal — character-trigram
+  Jaccard — catches reworded duplicates that the word-Jaccard signal misses.
+  Surfaced as a soft "Likely paraphrase" pill so a mod sees the relationship
+  without dedup-conflating it with a strict duplicate.
+- **Policy refusals (W3).** A per-sub `PolicyConfig` lets mods configure a
+  cooldown per target, hard-refuse appeals matching a blocked-reason pattern,
+  and cap the per-user appeals in a sliding window. Refusals throw the new
+  `APPEAL_INELIGIBLE` typed error with a human-readable reason.
 - **Unbounded data growth.** *Mitigation:* retention purges resolved appeals
   past a configurable window; the purge index lets the job range-scan only
-  due records.
+  due records. Three sister sweeps cover snapshots, idle rate-limit buckets,
+  and the resolved index (D6).
 - **Aging appeals rot silently.** *Mitigation:* a scheduled SLA-nudge job alerts
-  the mod team about appeals past the configured age.
+  the mod team about appeals past the configured age. The notice is also
+  forwarded through the optional `Notifier` (W4) so a deployment can wire
+  Slack/Discord/PagerDuty.
 - *Known scaling characteristic:* dedup hydrates a user's prior appeals on each
-  submission, which is linear in that user's history length. In practice this is
-  bounded (retention + realistic per-user appeal counts), but a pathological
-  single user with thousands of retained appeals would slow their own
-  submissions. A deployment can lower `retentionDays` or cap history depth.
+  submission. With the D1 bounded-window (`DEFAULT_MAX_PRIOR = 50` newest),
+  the work is O(50) per submission regardless of history length, so a single
+  pathological user can no longer slow their own submissions.
 
 ### Elevation of privilege — "gaining capability you shouldn't have"
 - **AI making a moderation decision.** *Mitigation — the central one:* AI is
@@ -128,11 +173,15 @@ words from misuse, (4) keep the queue available and fair.**
   AI is off or unavailable. Malformed model output is parsed defensively and
   discarded; over-long or empty drafts fall back to the static template.
 - **Prompt injection via appeal text.** *Threat:* a user writes their appeal to
-  manipulate the AI triage/softening prompt. *Mitigation:* the AI output is
-  never authoritative — a manipulated triage label is still only a hint a mod
-  may ignore, and a manipulated softened reply is still mod-reviewed before
-  sending. The blast radius is "a mod sees a misleading hint", not "an action is
-  taken". The triage prompt also states the no-decision rule explicitly.
+  manipulate the AI triage/softening prompt. *Mitigation:* (1) the AI output
+  is never authoritative — a manipulated triage label is still only a hint a
+  mod may ignore, and a manipulated softened reply is still mod-reviewed
+  before sending; (2) `escapeQuoted()` folds any embedded `"""` in user text
+  to `'''` before interpolation (D7), so a payload can't close the prompt's
+  quoted block; (3) a per-sub `aiBackend: 'noop'` setting force-disables AI
+  on the fly without having to un-wire the host's provider. The blast radius
+  is "a mod sees a misleading hint", not "an action is taken". The triage
+  prompt also states the no-decision rule explicitly.
 
 ## 4. Failure-handling posture
 

@@ -14,6 +14,8 @@
 export type AppealErrorCode =
   // validation (caller's fault — never retry)
   | 'VALIDATION_FAILED'
+  // policy (caller's fault — never retry; carries a human-readable reason)
+  | 'APPEAL_INELIGIBLE'
   // conflict / concurrency (caller may retry after re-reading)
   | 'DUPLICATE_OPEN_APPEAL'
   | 'OPTIMISTIC_LOCK_CONFLICT'
@@ -37,6 +39,7 @@ interface ErrorSpec {
 /** Static properties for each code: how a surface should treat it. */
 const SPECS: Record<AppealErrorCode, ErrorSpec> = {
   VALIDATION_FAILED: { status: 400, retryable: false },
+  APPEAL_INELIGIBLE: { status: 403, retryable: false },
   DUPLICATE_OPEN_APPEAL: { status: 409, retryable: false },
   OPTIMISTIC_LOCK_CONFLICT: { status: 409, retryable: true },
   RATE_LIMITED: { status: 429, retryable: true },
@@ -71,8 +74,13 @@ export class AppealError extends Error {
     Object.setPrototypeOf(this, AppealError.prototype);
   }
 
-  /** Stable, log-friendly shape. Never includes the stack (logged separately). */
+  /**
+   * Stable, log-friendly shape. Never includes the stack (logged separately).
+   * Includes `name` — `JSON.stringify(error)` is the obvious thing a forwarder
+   * does, and dropping `name` loses class identity at the sink (L5).
+   */
   toJSON(): {
+    name: string;
     code: AppealErrorCode;
     message: string;
     status: number;
@@ -80,6 +88,7 @@ export class AppealError extends Error {
     context: Record<string, unknown>;
   } {
     return {
+      name: this.name,
       code: this.code,
       message: this.message,
       status: this.status,
@@ -98,6 +107,8 @@ export function isAppealError(e: unknown): e is AppealError {
 export const errors = {
   validation: (message: string, context?: Record<string, unknown>) =>
     new AppealError('VALIDATION_FAILED', message, context),
+  ineligible: (reason: string, context?: Record<string, unknown>) =>
+    new AppealError('APPEAL_INELIGIBLE', reason, context),
   duplicateOpen: (targetId: string) =>
     new AppealError(
       'DUPLICATE_OPEN_APPEAL',

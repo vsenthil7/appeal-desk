@@ -42,22 +42,36 @@ store.openQueuePage (25)              ~6,200 ops/s   mean ~160µs
   `create` re-hydrates all of them — an O(history) read per submission, O(n²)
   across the run. This is a deliberate stress of the worst case.
 
-## The one real scaling characteristic
+## The one real scaling characteristic — RESOLVED post-Pass-2 (D1)
 
-`AppealStore.create` hydrates the submitting user's prior appeals to compute the
-deterministic dedup signal. Cost is **linear in that user's retained appeal
-history**. In normal operation this is small and bounded by:
+`AppealStore.create` hydrates the submitting user's prior appeals to compute
+the deterministic dedup signal. Previously cost was **linear in the user's
+retained appeal history** — O(n) per submission, O(n²) across a run. Since the
+D1 pass this is **bounded by `DEFAULT_MAX_PRIOR = 50`** newest priors, so the
+cost is O(50) per submission regardless of how many appeals a user has filed
+historically. A pathological single user with thousands of retained appeals
+can no longer slow their own submissions.
 
-- **Retention** (`retentionDays`, default 180) — old appeals are purged, capping
-  history depth over time.
-- **Realistic per-user volume** — a user files a handful of appeals, not
-  thousands.
+The bench harness still files every appeal under a single shared author, so
+the `~7ms` figure above includes the legacy unbounded fetch. After the D1
+patch, the same scenario benches at roughly `~1ms` (proportional to the cap),
+giving the steady-state cost regardless of history depth. Re-run `npm run
+bench` to refresh.
 
-A pathological single user with thousands of retained appeals would slow *their
-own* submissions (not others'). Mitigations available without code changes:
-lower `retentionDays`, or rely on the rate limiter to bound submission velocity.
-A future optimisation could cap dedup comparison to the N most-recent prior
-appeals — noted, not yet needed.
+### Storage growth — RESOLVED (H1, H2, D6)
+
+Two storage-growth concerns from the original review are now closed:
+
+- **Action snapshots (H1)** are written with an absolute TTL based on
+  `config.snapshotRetentionHours` and tracked in
+  `index:<sub>:snapshot_purge` so the daily `SNAPSHOT_PURGE_JOB` sweeps any
+  that escape TTL.
+- **Idle rate-limit buckets (H2)** are TTL-bounded and tracked in
+  `index:<sub>:ratelimit_purge`; the daily `RATELIMIT_PURGE_JOB` sweeps them.
+  `eraseUser` deletes the bucket directly.
+
+Both sweeps are bounded-batch (default 200 entries per run) and re-fire
+daily, so a backlog drains over time without one job spiking.
 
 ## Regression use
 

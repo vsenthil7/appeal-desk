@@ -7,10 +7,15 @@
  * a future appeal can show the mod the original context inline, and (2) for
  * bans, send the affected user a short, civil modmail inviting them to file a
  * structured appeal. We never auto-create an appeal — the user must choose to.
+ *
+ * Snapshot lifecycle is handled by `store.writeSnapshot` — that one helper
+ * applies the TTL (H1), registers the snapshot in the purge index (D6), and
+ * refuses to overwrite an existing snapshot (L4, so a removelink→spamlink
+ * sequence doesn't silently clobber the snapshot a pending appeal will read).
  */
 
 import { Devvit } from '@devvit/public-api';
-import { keys } from '../core/keys.js';
+import { AppealStore } from './context.js';
 import type { ActionType } from '../core/types.js';
 
 /** Human-readable reason derived from the action string (no reason field is
@@ -70,16 +75,28 @@ Devvit.addTrigger({
     const permalink =
       event.targetPost?.permalink ?? event.targetComment?.permalink;
 
-    // Record a lightweight action snapshot for later appeal context.
-    await context.redis.set(
-      keys.actionSeed(sub.name, targetId),
-      JSON.stringify({
-        actionType,
-        originalContent,
-        originalReason: reasonForAction(action),
-        permalink,
-      }),
-    );
+    // Record a lightweight action snapshot for later appeal context. The
+    // store helper handles TTL, the snapshot purge index, and no-overwrite
+    // (so a same-target re-action doesn't clobber a pending appeal's
+    // snapshot — see L4).
+    const store = new AppealStore(context.redis);
+    const config = await store.getConfig(sub.name);
+    try {
+      await store.writeSnapshot(
+        sub.name,
+        targetId,
+        {
+          actionType,
+          originalContent,
+          originalReason: reasonForAction(action),
+          permalink,
+        },
+        config,
+      );
+    } catch {
+      // Snapshot write failure is non-fatal — the appeal still works with
+      // placeholder context.
+    }
 
     // Invite the affected user to appeal (civil, links to the form). Only for
     // bans, where the user can't reach the removed item's menu.

@@ -21,6 +21,9 @@ describe('AppealError', () => {
   it('serialises to a stable, stack-free JSON shape', () => {
     const e = new AppealError('INTERNAL', 'boom', { x: 1 });
     expect(e.toJSON()).toEqual({
+      // L5: `name` is now included so `JSON.stringify(error)` preserves class
+      // identity at the log sink.
+      name: 'AppealError',
       code: 'INTERNAL',
       message: 'boom',
       status: 500,
@@ -38,6 +41,7 @@ describe('AppealError', () => {
   it('assigns the correct status/retryable for every code', () => {
     const expected: Record<AppealErrorCode, [number, boolean]> = {
       VALIDATION_FAILED: [400, false],
+      APPEAL_INELIGIBLE: [403, false],
       DUPLICATE_OPEN_APPEAL: [409, false],
       OPTIMISTIC_LOCK_CONFLICT: [409, true],
       RATE_LIMITED: [429, true],
@@ -69,6 +73,12 @@ describe('isAppealError', () => {
 describe('errors factory', () => {
   it('builds each error variant with the right code and context', () => {
     expect(errors.validation('m', { a: 1 }).code).toBe('VALIDATION_FAILED');
+    expect(errors.ineligible('cooldown active', { cooldown: 10 }).code).toBe(
+      'APPEAL_INELIGIBLE',
+    );
+    expect(errors.ineligible('cooldown active', { cooldown: 10 }).context).toMatchObject({
+      cooldown: 10,
+    });
     expect(errors.duplicateOpen('t3_x').context).toMatchObject({ targetId: 't3_x' });
     expect(errors.lockConflict('k', 1, 2).code).toBe('OPTIMISTIC_LOCK_CONFLICT');
     expect(errors.rateLimited('u', 500).context).toMatchObject({

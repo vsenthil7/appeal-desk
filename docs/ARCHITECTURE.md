@@ -300,17 +300,59 @@ erDiagram
     }
 ```
 
-Redis keys backing the above (all built in `core/keys.ts`):
+Redis keys backing the above (all built in `core/keys.ts`; the `KEY_DESCRIPTIONS`
+table in that module is the canonical source — this section is rendered from it):
 
 ```mermaid
 flowchart LR
-    K1["appeal:&lt;sub&gt;:&lt;id&gt;"] --> V1["Appeal (JSON)"]
+    K1["appeal:&lt;sub&gt;:&lt;id&gt;"] --> V1["Appeal record (JSON)"]
     K2["history:&lt;sub&gt;:&lt;user&gt;"] --> V2["sorted set of appeal ids\n(score = timestamp)"]
-    K3["index:&lt;sub&gt;:open"] --> V3["sorted set of open ids\n(score = timestamp)"]
-    K4["action:&lt;sub&gt;:&lt;targetId&gt;"] --> V4["open appeal id\n(per-action lock)"]
-    K5["action:&lt;sub&gt;:seed:&lt;targetId&gt;"] --> V5["action snapshot (JSON)\nstashed at removal/ban"]
-    K6["config:&lt;sub&gt;"] --> V6["SubredditConfig (JSON)"]
+    K3["index:&lt;sub&gt;:open"] --> V3["sorted set of OPEN appeal ids\n(score = timestamp)"]
+    K4["index:&lt;sub&gt;:purge"] --> V4["sorted set of resolved ids,\nscored by purge-eligibility ts"]
+    K5["index:&lt;sub&gt;:snapshot_purge"] --> V5["sorted set of action-snapshot\ntargetIds scored by write ts (H1)"]
+    K6["index:&lt;sub&gt;:ratelimit_purge"] --> V6["sorted set of rate-limit\nusernames scored by last-touch (H2)"]
+    K7["index:&lt;sub&gt;:resolved"] --> V7["sorted set of recently-resolved ids\nscored by decidedAt — analytics seed (W2)"]
+    K8["index:&lt;sub&gt;:erasure_log"] --> V8["mod-driven erasure audit trail (W1)"]
+    K9["index:&lt;sub&gt;:dlq"] --> V9["dead-letter index for failed jobs"]
+    K10["action:&lt;sub&gt;:&lt;targetId&gt;"] --> V10["open appeal id\n(per-action lock)"]
+    K11["actionseed:&lt;sub&gt;:&lt;targetId&gt;"] --> V11["action snapshot (JSON);\nTTL-bounded (H1)"]
+    K12["ratelimit:&lt;sub&gt;:&lt;user&gt;"] --> V12["token-bucket state (JSON);\nTTL-bounded (H2)"]
+    K13["ratelimit-sub:&lt;sub&gt;:&lt;actionType&gt;"] --> V13["sub-wide token bucket\nper actionType (D3)"]
+    K14["claim:&lt;sub&gt;:&lt;id&gt;"] --> V14["mod-id holding the appeal,\nTTL-bounded (W4)"]
+    K15["config:&lt;sub&gt;"] --> V15["SubredditConfig (JSON)"]
+    K16["policy:&lt;sub&gt;"] --> V16["per-sub PolicyConfig (W3)"]
+    K17["dedupsig:&lt;sub&gt;:&lt;user&gt;"] --> V17["compact rolling dedup signature\n(reserved for D2 incremental)"]
 ```
+
+### 6.1 Retention scheduler (Doc-6)
+
+Three of the index families above are driven by recurring cron jobs registered
+in `server/scheduler.ts`. Each is a bounded-batch sweeper: a job pulls at most
+`limit` entries due before `now`, deletes them, and the cron re-fires the next
+day so a backlog drains over time rather than spiking one run.
+
+```mermaid
+flowchart TB
+    CRON1["cron 0 3 * * *"] --> RPJ["RETENTION_PURGE_JOB\nstore.purgeExpired (resolved appeals)"]
+    CRON2["cron 15 3 * * *"] --> SPJ["SNAPSHOT_PURGE_JOB\nstore.purgeExpiredSnapshots (H1)"]
+    CRON3["cron 30 3 * * *"] --> RLPJ["RATELIMIT_PURGE_JOB\nstore.purgeExpiredRateLimits (H2)"]
+    CRON4["cron 0 */6 * * *"] --> SLA["SLA_NUDGE_JOB\nmodmail + Notifier (W4)"]
+
+    RPJ --> RD["index:&lt;sub&gt;:purge"]
+    SPJ --> SD["index:&lt;sub&gt;:snapshot_purge"]
+    RLPJ --> LD["index:&lt;sub&gt;:ratelimit_purge"]
+    SLA --> SLAIDX["index:&lt;sub&gt;:open"]
+
+    classDef job fill:#e8f4ff,stroke:#0079d3,color:#000
+    classDef idx fill:#fff4e6,stroke:#d93a00,color:#000
+    class RPJ,SPJ,RLPJ,SLA job
+    class RD,SD,LD,SLAIDX idx
+```
+
+Each sweep is **idempotent and bounded**: a sweeper deletes only entries whose
+TTL has elapsed (or whose retention score is past `now`). TTLs at write time
+are the primary defence; the index sweep is the deterministic belt-and-braces
+so a host with drifting TTL semantics still maintains the invariants.
 
 ---
 

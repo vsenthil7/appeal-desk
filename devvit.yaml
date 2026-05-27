@@ -1,6 +1,11 @@
 # Devvit app manifest for Appealdesk
+#
+# `name:` must match the slug registered on developers.reddit.com — the slug
+# (lowercase, hyphenated) is the deploy identifier. The product brand is still
+# "Appealdesk" in user-facing strings; only this slug uses the hyphenated form.
+#
 # Run `devvit upload` to publish, `devvit playtest <subreddit>` to test live.
-name: appealdesk
+name: appeal-desk
 
 # Permissions the app requests. Appealdesk needs the Reddit API at mod scope
 # (to read removal actions and send modmail), Redis for storage, and the

@@ -370,7 +370,7 @@ describe('store: storage errors', () => {
     });
   });
 
-  it('rejects a duplicate when the lock is under persistent contention', async () => {
+  it('reports persistent CAS contention on the lock as OPTIMISTIC_LOCK_CONFLICT (M2)', async () => {
     const { store, redis } = makeStore();
     await store.setConfig('aww', {
       ...DEFAULT_CONFIG,
@@ -379,8 +379,10 @@ describe('store: storage errors', () => {
     // Two resolved appeals; alternate the lock between their ids each round.
     // Both pass the holder-check (resolved => reclaimable), but because the
     // watched lock value changes between watch and exec every time, each claim
-    // transaction aborts. The retry budget is exhausted and the defensive
-    // contention fallback returns a duplicate rejection.
+    // transaction aborts. With the M2 fix, exhausting the retry budget with no
+    // CONFIRMED open holder surfaces OPTIMISTIC_LOCK_CONFLICT (retryable),
+    // NOT DUPLICATE_OPEN_APPEAL (which is non-retryable and would mislead the
+    // user into thinking they already filed an appeal).
     const seedResolved = async (target: string) => {
       const a = await store.create(input({ targetId: target }));
       await store.decide('aww', a.id, 'overturned', {
@@ -397,9 +399,13 @@ describe('store: storage errors', () => {
     const lockKey = keys.actionLock('aww', 't2_alice');
     let toggle = 0;
     const bump = async (key: string) => {
+      // Re-arm unconditionally — `consumeRateToken` now WATCH-guards the rate-
+      // limit bucket too (M1), so the *first* watched read on a `create` call
+      // is on the bucket key, not the lock. We let that one no-op and stay
+      // armed so the subsequent lock-watch fires the contention.
+      redis.onWatchedRead = bump;
       if (key === lockKey) {
         await redis.set(lockKey, toggle++ % 2 === 0 ? idB : idA);
-        redis.onWatchedRead = bump; // re-arm for the next attempt
       }
     };
     await redis.set(lockKey, idA); // resolved holder => reclaimable
@@ -407,7 +413,7 @@ describe('store: storage errors', () => {
 
     await expect(
       store.create(input({ targetId: 't2_alice' })),
-    ).rejects.toMatchObject({ code: 'DUPLICATE_OPEN_APPEAL' });
+    ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_CONFLICT' });
   });
 
   it('wraps a lock-claim exec failure in STORAGE_UNAVAILABLE', async () => {
@@ -437,11 +443,16 @@ describe('store: storage errors', () => {
     });
   });
 
-  it('wraps a del failure (releasing the action lock on resolve) in STORAGE_UNAVAILABLE', async () => {
+  it('surfaces a post-resolve index-batch failure as STORAGE_UNAVAILABLE', async () => {
     const { store, redis } = makeStore();
     const a = await store.create(input());
-    // The decision itself commits; releasing the per-action lock then fails.
-    redis.failNext = { op: 'del', key: keys.actionLock('aww', 't2_alice') };
+    // After D2's tx batching, releasing the action lock + dropping the snapshot
+    // + scheduling the purge entry all run inside one MULTI/EXEC instead of
+    // four sequential `del`/`zRem`/`zAdd` calls. To assert that the failure
+    // still surfaces as STORAGE_UNAVAILABLE, we inject on the SECOND exec the
+    // operation issues (the first is mutate's own write; the second is the
+    // post-mutate index batch).
+    redis.failNext = { op: 'exec', skip: 1 };
     await expect(
       store.decide('aww', a.id, 'upheld', {
         modId: 'm',

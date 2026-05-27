@@ -2,7 +2,9 @@
  * Menu items — the entry points surfaced in Reddit's UI.
  *
  *   1. Subreddit menu  → "Create Appealdesk dashboard" (mods, one-time setup).
- *   2. Post/comment menu → "Appeal this removal" (the affected user).
+ *   2. Subreddit menu  → "Appealdesk: erase a user's appeals" (W1 mod-facing
+ *      erasure surface).
+ *   3. Post/comment menu → "Appeal this removal" (the affected user).
  *
  * Mod-only items are gated with `forUserType: 'moderator'`. The appeal item is
  * available to the content's author.
@@ -10,8 +12,9 @@
 
 import { Devvit } from '@devvit/public-api';
 import { intakeForm } from './intake.js';
-import { keys } from '../core/keys.js';
+import { AppealStore, makeService } from './context.js';
 import type { ActionType } from '../core/types.js';
+import { eraseUserForm } from './eraseForm.js';
 
 /** Mods: create the pinned, mod-only Appeals Dashboard custom post. */
 Devvit.addMenuItem({
@@ -36,6 +39,16 @@ Devvit.addMenuItem({
       text: 'Appeals Dashboard created and pinned.',
     });
     context.ui.navigateTo(post);
+  },
+});
+
+/** W1: mod-facing erasure surface. */
+Devvit.addMenuItem({
+  label: "Appealdesk: erase a user's appeals",
+  location: 'subreddit',
+  forUserType: 'moderator',
+  onPress: (_event, context) => {
+    context.ui.showForm(eraseUserForm);
   },
 });
 
@@ -67,14 +80,26 @@ Devvit.addMenuItem({
       // Non-fatal — the appeal still works with placeholders.
     }
 
-    // Stash an action snapshot for the submit handler to read back. The mod
-    // sees this on the dashboard; it never enters the user's editable form.
-    await context.redis.set(
-      keys.actionSeed(subreddit, targetId),
-      JSON.stringify({ actionType, originalContent, originalReason, permalink }),
-    );
+    // Stash an action snapshot via the store helper so the L4 no-overwrite
+    // guard and H1 TTL apply here too. The mod sees the snapshot on the
+    // dashboard; it never enters the user's editable form.
+    const store = new AppealStore(context.redis);
+    const config = await store.getConfig(subreddit);
+    try {
+      await store.writeSnapshot(
+        subreddit,
+        targetId,
+        { actionType, originalContent, originalReason, permalink },
+        config,
+      );
+    } catch {
+      // Non-fatal — the appeal still works with placeholder context.
+    }
 
     // Only JSON-safe, user-visible fields go into the form data bag.
     context.ui.showForm(intakeForm, { actionType, targetId });
+    // Touch makeService to keep the import alive for tree-shakers; the
+    // service is also constructed implicitly by intakeForm's submit handler.
+    void makeService;
   },
 });
