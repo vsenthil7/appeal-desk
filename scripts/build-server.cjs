@@ -7,10 +7,16 @@
  *     Devvit CLI reads that file directly (no TS compile, no bundling); see
  *     `BundleModule.newServerBundle` in `@devvit/build-pack`.
  *   - The schema says: "Must be a self-contained JavaScript file except for
- *     standard Node.js API imports in CommonJS format." So everything from
- *     the source tree (core/, ai/, validators, etc.) must be inlined, but
- *     Node built-ins and the runtime-provided `@devvit/*` packages stay
- *     external (the host provides them).
+ *     standard Node.js API imports in CommonJS format."
+ *
+ * EXTERNAL POLICY (the key insight that took several iterations to find):
+ *   The Devvit server runtime does NOT expose ANY `@devvit/*` package by
+ *   name — not the barrels (`@devvit/web/server`, `@devvit/web`), not the
+ *   sub-packages (`@devvit/server`, `@devvit/redis`, `@devvit/reddit`), and
+ *   not even `@devvit/protos` sub-paths.
+ *
+ *   The bundle must be FULLY self-contained: every `@devvit/*` import gets
+ *   inlined. Only Node built-ins are external.
  *
  * Run as: `node scripts/build-server.cjs` (also wired as `npm run build`).
  */
@@ -28,6 +34,19 @@ const outfile = path.join(outdir, 'main.js');
 
 fs.mkdirSync(outdir, { recursive: true });
 
+// Node built-in modules — these ARE available in the Devvit server runtime
+// because it's a Node-shaped environment. Externalising them keeps the bundle
+// smaller and matches the schema's "standard Node.js API imports" clause.
+const nodeBuiltins = [
+  'assert', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console',
+  'constants', 'crypto', 'dgram', 'diagnostics_channel', 'dns', 'domain',
+  'events', 'fs', 'http', 'http2', 'https', 'inspector', 'module', 'net',
+  'os', 'path', 'perf_hooks', 'process', 'punycode', 'querystring',
+  'readline', 'repl', 'stream', 'string_decoder', 'sys', 'test', 'timers',
+  'tls', 'trace_events', 'tty', 'url', 'util', 'v8', 'vm', 'wasi',
+  'worker_threads', 'zlib',
+];
+
 esbuild
   .build({
     entryPoints: [entry],
@@ -37,26 +56,9 @@ esbuild
     format: 'cjs',
     outfile,
     sourcemap: 'linked',
-    // Devvit's host runtime provides these — they must stay as runtime imports
-    // so the bundle is "self-contained except for standard Node.js APIs."
-    // Anything beginning with `@devvit/` is a host-provided module under 0.13.
     external: [
-      '@devvit/web',
-      '@devvit/web/*',
-      '@devvit/public-api',
-      '@devvit/cache',
-      '@devvit/media',
-      '@devvit/notifications',
-      '@devvit/payments',
-      '@devvit/realtime',
-      '@devvit/reddit',
-      '@devvit/redis',
-      '@devvit/scheduler',
-      '@devvit/server',
-      '@devvit/settings',
-      '@devvit/shared',
-      '@devvit/shared-types',
-      '@devvit/protos',
+      'node:*',
+      ...nodeBuiltins,
     ],
     logLevel: 'info',
     metafile: false,

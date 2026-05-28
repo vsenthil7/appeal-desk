@@ -1,0 +1,11 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.resolve(__dirname, '..', 'dist', 'server', 'main.js');
+const code = fs.readFileSync(file, 'utf8');
+const re = /require\(["']([^"']+)["']\)/g;
+const seen = new Set();
+let m;
+while ((m = re.exec(code))) seen.add(m[1]);
+const sorted = [...seen].sort();
+console.log('Unique require() targets in bundle (' + sorted.length + '):');
+sorted.forEach(s => console.log('  ' + s));

@@ -6,7 +6,7 @@
  *
  * Also serves `/internal/menu/*` endpoints declared in `devvit.json` for
  * menu items that can't run in the Blocks runtime (anything needing the
- * `@devvit/web/server` reddit client, e.g. `submitCustomPost`).
+ * server-side reddit client, e.g. `submitCustomPost`).
  *
  * Architecture (mirrors the 0.11/0.12 Blocks shell, just over HTTP):
  *
@@ -22,14 +22,24 @@
  * The `core/` and `ai/` modules import nothing from Devvit, so they're reused
  * verbatim from the legacy shell. Only the adapter layer changes: instead of
  * `context.redis` / `context.reddit`, the new server uses the module-level
- * `redis` and `reddit` imports from `@devvit/web/server`.
+ * `redis` and `reddit` imports from the underlying `@devvit/*` sub-packages.
+ *
+ * NOTE on imports: this file deliberately imports from `@devvit/server`,
+ * `@devvit/reddit`, `@devvit/redis` directly, NOT from the `@devvit/web/server`
+ * barrel. The Devvit host runtime resolves the individual sub-packages but
+ * does NOT resolve the `@devvit/web/server` barrel name — apps using the
+ * barrel name fail at install time with "Cannot find module '@devvit/web/server'".
+ * Imports here match the barrel's own re-export tree (see
+ * `node_modules/@devvit/web/server/index.d.ts`).
  *
  * The HTTP framing (body parsing, JSON responses, route dispatch) is in the
  * platform-free `./http.js` so it can be unit-tested without pulling in the
  * Devvit host runtime. This file is the thin wiring layer.
  */
 
-import { createServer, context, redis, reddit, getServerPort } from '@devvit/web/server';
+import { createServer, context, getServerPort } from '@devvit/server';
+import { redis } from '@devvit/redis';
+import { reddit } from '@devvit/reddit';
 import type { ServerResponse } from 'node:http';
 import { AppealStore } from '../core/store.js';
 import {
@@ -74,7 +84,7 @@ const gateway: RedditGateway = {
  * absent here — the `NoopAiProvider` selected by `selectProvider(false,
  * undefined)` inside the service is the right default, and the AI runtime
  * hook that the legacy Blocks shell used (`context.ai.generateText`) does
- * not have an `@devvit/web/server` equivalent in 0.13.0 yet.
+ * not have a 0.13 server-side equivalent yet.
  * ----------------------------------------------------------------------- */
 
 function makeService(): AppealService {
@@ -251,22 +261,17 @@ async function routeWhoami(
 
 /* -------------------------------------------------------------------------
  * /internal/menu/* routes — called by Devvit when a JSON-config menu item
- * is tapped. The response is the menu-action effect protocol.
+ * is tapped.
  *
- * Response shape per `ContextActionResponse` (json/devvit/actor/reddit/
- * context_action.d.ts):
+ * Response shape per the CLI's blocks.template.js `validateUiResponse`:
  *
- *   { success: boolean, message: string, effects: Effect[] }
+ *   { showToast?: string | { text, appearance? },
+ *     navigateTo?: string | Post,
+ *     showForm?: { name, data?, form? } }
  *
- * where each Effect can carry one of `showToast`, `navigateToUrl`,
- * `showForm`, etc. plus a `type` enum value (EffectType, e.g. 4 for
- * EFFECT_SHOW_TOAST, 5 for EFFECT_NAVIGATE_TO_URL). We construct both a
- * toast (so the mod sees "Created.") and a navigate (so the dashboard
- * opens immediately).
+ * Flat object, NOT the `ContextActionResponse` proto shape. Only these
+ * three keys are valid; `navigateTo` and `showForm` are mutually exclusive.
  * ----------------------------------------------------------------------- */
-
-const EFFECT_SHOW_TOAST = 4;
-const EFFECT_NAVIGATE_TO_URL = 5;
 
 async function routeMenuCreateDashboard(
   _body: Record<string, unknown>,
@@ -287,30 +292,19 @@ async function routeMenuCreateDashboard(
         text: 'Open the Appeals Dashboard to triage open appeals.',
       },
     });
-    // Best-effort sticky: pin the dashboard so mods always have it at the top.
     try {
       await post.sticky();
     } catch {
       // Non-fatal — the post still exists, just not pinned.
     }
+    // UiResponse shape: flat object, only `showToast` / `navigateTo` /
+    // `showForm` keys allowed.
     sendOk(res, {
-      success: true,
-      message: 'Appeals Dashboard created and pinned.',
-      effects: [
-        {
-          type: EFFECT_SHOW_TOAST,
-          showToast: {
-            toast: {
-              text: 'Appeals Dashboard created and pinned.',
-              appearance: 1, // SUCCESS
-            },
-          },
-        },
-        {
-          type: EFFECT_NAVIGATE_TO_URL,
-          navigateToUrl: { url: post.url ?? post.permalink ?? '' },
-        },
-      ],
+      showToast: {
+        text: 'Appeals Dashboard created and pinned.',
+        appearance: 'success',
+      },
+      navigateTo: post.url ?? post.permalink ?? `https://www.reddit.com/r/${subredditName}/`,
     });
   } catch (err) {
     sendError(res, err);
