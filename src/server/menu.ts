@@ -1,21 +1,23 @@
 /**
  * Menu items — Devvit 0.13 version.
  *
- * What changed from the 0.11/0.12 version:
+ * Split between two delivery mechanisms because 0.13 has different
+ * capabilities in different runtimes:
  *
- *   - The Blocks "preview" inside `submitPost(...)` is gone (the field was
- *     removed from `SubmitPostOptions` in 0.13). The web-view post is created
- *     via the module-level `reddit.submitCustomPost(...)` from
- *     `@devvit/web/server`, which renders the entrypoint declared in
- *     `devvit.json` under `post.entrypoints.default`.
- *   - `eraseUserForm` is registered inline rather than in a separate `.tsx`
- *     file. Blocks forms via `Devvit.createForm` are still supported.
+ *   - The "create dashboard" item creates a custom web-view post via
+ *     `reddit.submitCustomPost(...)`. That API only exists on the
+ *     `@devvit/web/server` runtime, NOT on the Blocks `context.reddit`
+ *     surface. So it's declared in `devvit.json#menu.items` and dispatches
+ *     to `/internal/menu/create-dashboard` in `src/server/main.ts`.
  *
- * Three menu items survive from the original design:
- *   1. Subreddit menu  → "Appeal-Desk: create dashboard" (mods, one-time setup).
- *   2. Subreddit menu  → "Appeal-Desk: erase a user's appeals" (W1 mod-facing
- *      erasure surface).
- *   3. Post / comment  → "Appeal this removal" (the affected user).
+ *   - The other items ("erase a user's appeals", "Appeal this removal")
+ *     don't need server-only APIs — they show forms via `context.ui.showForm`,
+ *     which works fine from a Blocks menu handler. Those stay here.
+ *
+ * Forms (`Devvit.createForm`) are still legal in 0.13 Blocks mode. The
+ * "show the form" call happens from a Blocks handler; the form's own
+ * submit handler runs in the Blocks runtime too. We don't need to
+ * migrate forms to the JSON-config `forms` block for this app.
  */
 
 import { Devvit } from '@devvit/public-api';
@@ -80,40 +82,14 @@ export const eraseUserForm = Devvit.createForm(
 );
 
 /**
- * Mods: create the pinned Appeals Dashboard custom post.
+ * W1: mod-facing erasure surface. Shows the GDPR erasure form.
  *
- * Uses the new 0.13 `submitCustomPost` via the module-level `reddit` import
- * from `@devvit/web/server`. The post entrypoint resolves to the `default`
- * entry declared in `devvit.json` (`client/index.html`).
+ * Note: "create dashboard" used to live here too, but its implementation
+ * required `reddit.submitCustomPost` from `@devvit/web/server`, which is
+ * unavailable in the Blocks runtime. It's been moved to `devvit.json`
+ * under `menu.items` -> `/internal/menu/create-dashboard`. See
+ * `src/server/main.ts` for the handler.
  */
-Devvit.addMenuItem({
-  label: 'Appeal-Desk: create dashboard',
-  location: 'subreddit',
-  forUserType: 'moderator',
-  onPress: async (_event, context) => {
-    const { reddit } = await import('@devvit/web/server');
-    const sub = await context.reddit.getCurrentSubreddit();
-    const post = await reddit.submitCustomPost({
-      subredditName: sub.name,
-      title: 'Appeal-Desk - Appeals Dashboard (mods only)',
-      textFallback: {
-        text: 'Open the Appeals Dashboard to triage open appeals.',
-      },
-    });
-    try {
-      await post.sticky();
-    } catch {
-      // non-fatal: post still works without being pinned
-    }
-    context.ui.showToast({
-      appearance: 'success',
-      text: 'Appeals Dashboard created and pinned.',
-    });
-    context.ui.navigateTo(post);
-  },
-});
-
-/** W1: mod-facing erasure surface. */
 Devvit.addMenuItem({
   label: "Appeal-Desk: erase a user's appeals",
   location: 'subreddit',

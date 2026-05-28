@@ -4,6 +4,10 @@
  * The custom-post web view served from `client/index.html` makes JSON
  * requests to `/api/*`. This module is the server that handles them.
  *
+ * Also serves `/internal/menu/*` endpoints declared in `devvit.json` for
+ * menu items that can't run in the Blocks runtime (anything needing the
+ * `@devvit/web/server` reddit client, e.g. `submitCustomPost`).
+ *
  * Architecture (mirrors the 0.11/0.12 Blocks shell, just over HTTP):
  *
  *   client web view  -- fetch('/api/...')  -->  this server
@@ -95,7 +99,7 @@ function buildRouteContext(): RouteContext {
 }
 
 /* -------------------------------------------------------------------------
- * Routes
+ * /api/* routes — called by the web view
  * ----------------------------------------------------------------------- */
 
 async function routeAppealsList(
@@ -246,10 +250,79 @@ async function routeWhoami(
 }
 
 /* -------------------------------------------------------------------------
+ * /internal/menu/* routes — called by Devvit when a JSON-config menu item
+ * is tapped. The response is the menu-action effect protocol.
+ *
+ * Response shape per `ContextActionResponse` (json/devvit/actor/reddit/
+ * context_action.d.ts):
+ *
+ *   { success: boolean, message: string, effects: Effect[] }
+ *
+ * where each Effect can carry one of `showToast`, `navigateToUrl`,
+ * `showForm`, etc. plus a `type` enum value (EffectType, e.g. 4 for
+ * EFFECT_SHOW_TOAST, 5 for EFFECT_NAVIGATE_TO_URL). We construct both a
+ * toast (so the mod sees "Created.") and a navigate (so the dashboard
+ * opens immediately).
+ * ----------------------------------------------------------------------- */
+
+const EFFECT_SHOW_TOAST = 4;
+const EFFECT_NAVIGATE_TO_URL = 5;
+
+async function routeMenuCreateDashboard(
+  _body: Record<string, unknown>,
+  res: ServerResponse,
+): Promise<void> {
+  const subredditName = context.subredditName;
+  if (!subredditName) {
+    sendJson(res, 400, {
+      error: { code: 'VALIDATION_FAILED', message: 'no subreddit in context' },
+    });
+    return;
+  }
+  try {
+    const post = await reddit.submitCustomPost({
+      subredditName,
+      title: 'Appeal-Desk - Appeals Dashboard (mods only)',
+      textFallback: {
+        text: 'Open the Appeals Dashboard to triage open appeals.',
+      },
+    });
+    // Best-effort sticky: pin the dashboard so mods always have it at the top.
+    try {
+      await post.sticky();
+    } catch {
+      // Non-fatal — the post still exists, just not pinned.
+    }
+    sendOk(res, {
+      success: true,
+      message: 'Appeals Dashboard created and pinned.',
+      effects: [
+        {
+          type: EFFECT_SHOW_TOAST,
+          showToast: {
+            toast: {
+              text: 'Appeals Dashboard created and pinned.',
+              appearance: 1, // SUCCESS
+            },
+          },
+        },
+        {
+          type: EFFECT_NAVIGATE_TO_URL,
+          navigateToUrl: { url: post.url ?? post.permalink ?? '' },
+        },
+      ],
+    });
+  } catch (err) {
+    sendError(res, err);
+  }
+}
+
+/* -------------------------------------------------------------------------
  * Wire up + start
  * ----------------------------------------------------------------------- */
 
 export const routes: RouteTable = {
+  // Web-view API
   '/api/appeals/list': routeAppealsList,
   '/api/appeals/open': routeAppealOpen,
   '/api/appeals/suggest-reply': routeSuggestReply,
@@ -259,6 +332,8 @@ export const routes: RouteTable = {
   '/api/appeals/erase': routeErase,
   '/api/analytics': routeAnalytics,
   '/api/whoami': routeWhoami,
+  // Internal menu endpoints (called by Devvit when a JSON-config menu item is tapped)
+  '/internal/menu/create-dashboard': routeMenuCreateDashboard,
 };
 
 const server = createServer((req, res) => dispatch(req, res, routes));

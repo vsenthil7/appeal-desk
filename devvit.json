@@ -21,6 +21,17 @@
     "dir": "dist/server",
     "entry": "main.js"
   },
+  "menu": {
+    "items": [
+      {
+        "label": "Appeal-Desk: create dashboard",
+        "description": "Create the pinned mods-only Appeals Dashboard post.",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/create-dashboard"
+      }
+    ]
+  },
   "permissions": {
     "reddit": { "enable": true, "scope": "moderator" },
     "redis": true
