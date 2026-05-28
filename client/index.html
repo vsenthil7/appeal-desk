@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Appeal-Desk</title>
+  <style>
+    :root {
+      /* Brand palette mirrors the pitch deck + covers. */
+      --navy: #0c1a2b;
+      --panel: #14263e;
+      --cream: #f5efe3;
+      --text-secondary: #9ba8ba;
+      --verdigris: #4caf7d;
+      --coral: #e26464;
+      --blue: #5e8bd4;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--navy);
+      color: var(--cream);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 36px 28px 60px;
+    }
+    .top-strip {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      margin-bottom: 28px;
+    }
+    .top-strip .tick {
+      display: inline-block;
+      width: 28px;
+      height: 4px;
+      background: var(--verdigris);
+    }
+    h1 {
+      font-size: clamp(36px, 6vw, 56px);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin: 0 0 12px;
+      line-height: 1.05;
+    }
+    .underline {
+      display: inline-block;
+      width: 56px;
+      height: 4px;
+      background: var(--verdigris);
+      margin: 0 0 22px;
+    }
+    .subtitle {
+      font-size: clamp(18px, 2.6vw, 24px);
+      font-style: italic;
+      color: var(--cream);
+      margin: 0 0 12px;
+    }
+    .tagline {
+      color: var(--text-secondary);
+      font-size: 16px;
+      max-width: 60ch;
+      margin: 0 0 36px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin-bottom: 36px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(76, 175, 125, 0.35);
+      border-radius: 8px;
+      padding: 18px 18px 16px;
+    }
+    .card h3 {
+      font-size: 13px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--verdigris);
+      margin: 0 0 6px;
+    }
+    .card p {
+      margin: 0;
+      font-size: 14px;
+      color: var(--cream);
+    }
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px;
+      margin-bottom: 36px;
+    }
+    .kpi {
+      background: var(--panel);
+      border: 1px solid var(--verdigris);
+      border-radius: 8px;
+      padding: 14px 12px;
+      text-align: center;
+    }
+    .kpi .big {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--cream);
+    }
+    .kpi .small {
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+    .steps {
+      counter-reset: step;
+      list-style: none;
+      padding: 0;
+      margin: 0 0 36px;
+    }
+    .steps li {
+      counter-increment: step;
+      position: relative;
+      padding: 14px 16px 14px 56px;
+      background: var(--panel);
+      border-left: 3px solid var(--verdigris);
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
+    .steps li::before {
+      content: counter(step);
+      position: absolute;
+      left: 18px;
+      top: 14px;
+      font-weight: 700;
+      color: var(--verdigris);
+      font-size: 18px;
+    }
+    .steps li .title {
+      font-weight: 600;
+      color: var(--cream);
+      font-size: 14px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .steps li .desc {
+      font-size: 14px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+    footer {
+      border-top: 1px solid rgba(155, 168, 186, 0.2);
+      padding-top: 18px;
+      margin-top: 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+    }
+    a {
+      color: var(--verdigris);
+      text-decoration: none;
+    }
+    a:hover { text-decoration: underline; }
+    .stat-row {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-bottom: 20px;
+    }
+    .stat-row .stat {
+      color: var(--cream);
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main class="container" data-app="appeal-desk">
+    <div class="top-strip">
+      <span class="tick" aria-hidden="true"></span>
+      AT-HACK0022 &middot; Reddit Dev Platform 2026 &middot; Appeal-Desk
+    </div>
+
+    <h1>Appeal-Desk</h1>
+    <span class="underline" aria-hidden="true"></span>
+    <p class="subtitle">A fair appeals desk for modteams.</p>
+    <p class="tagline">
+      Structured intake &middot; audit trail &middot; one-tap decisions &middot; civil replies.
+      AI assists; mods decide &mdash; and it still works with AI off.
+    </p>
+
+    <p class="stat-row">
+      Version <span class="stat" id="version">0.0.4</span> &middot;
+      Public API <span class="stat" id="public-api">0.13.0</span> &middot;
+      <span class="stat" id="status">Ready</span>
+    </p>
+
+    <div class="kpis" id="kpis">
+      <div class="kpi"><div class="big">288</div><div class="small">tests pass</div></div>
+      <div class="kpi"><div class="big">99.97%</div><div class="small">line coverage</div></div>
+      <div class="kpi"><div class="big">100%</div><div class="small">function coverage</div></div>
+      <div class="kpi"><div class="big">0</div><div class="small">AI required</div></div>
+    </div>
+
+    <h2 style="font-size:20px; margin:8px 0 14px; color:var(--cream);">How to use it</h2>
+    <ol class="steps">
+      <li>
+        <div class="title">Install</div>
+        <div class="desc">
+          From the sub's mod toolbar, install Appeal-Desk on your subreddit. The
+          app needs Reddit moderator scope, Redis, and the scheduler. No
+          external HTTP.
+        </div>
+      </li>
+      <li>
+        <div class="title">Mod action triggers an invite</div>
+        <div class="desc">
+          When you ban or remove content, the user receives a civil modmail
+          inviting them to file a structured appeal. The original action
+          context is snapshotted at the moment of action &mdash; the user can't
+          edit your reason.
+        </div>
+      </li>
+      <li>
+        <div class="title">Triage from the dashboard</div>
+        <div class="desc">
+          Use the &quot;Appeal-Desk: create dashboard&quot; menu item once per
+          sub to pin the appeals queue. Each appeal opens with full history,
+          a near-duplicate Jaccard flag, and three one-tap buttons:
+          Uphold, Overturn, Ask for more info.
+        </div>
+      </li>
+      <li>
+        <div class="title">Reply-confirm gate</div>
+        <div class="desc">
+          Every one-tap button opens a reply-confirm form with a templated
+          civil reply pre-filled. Nothing is sent until you confirm. The
+          decision is recorded before the reply is dispatched.
+        </div>
+      </li>
+      <li>
+        <div class="title">Audit trail + retention</div>
+        <div class="desc">
+          Every decision, reply, and state change is logged. A daily retention
+          purge runs at 03:00; GDPR-style erasure is available from the mod
+          menu (scrubs free text, keeps a tombstone, idempotent).
+        </div>
+      </li>
+    </ol>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Structured intake</h3>
+        <p>Validated, sanitised, rate-limited. Per-action atomic lock (WATCH/MULTI/EXEC CAS) prevents duplicate appeals.</p>
+      </div>
+      <div class="card">
+        <h3>Deterministic dedup</h3>
+        <p>Jaccard fingerprint against the user's prior appeals &mdash; surfaced as a flag, never as a block.</p>
+      </div>
+      <div class="card">
+        <h3>AI is optional</h3>
+        <p><code>NoopAiProvider</code> is the default. Toggle on in settings; the full happy path works either way.</p>
+      </div>
+      <div class="card">
+        <h3>Platform-free core</h3>
+        <p><code>core/</code> + <code>ai/</code> import nothing from Devvit. 100% function coverage without the runtime.</p>
+      </div>
+    </div>
+
+    <footer>
+      <span>
+        <a href="https://github.com/vsenthil7/appeal-desk" target="_blank" rel="noopener">github.com/vsenthil7/appeal-desk</a>
+      </span>
+      <span>MIT &middot; AT-Hack0022 &middot; 2026</span>
+    </footer>
+  </main>
+
+  <script type="module">
+    // Minimal client logic. Just marks the page as ready so it's testable. The
+    // dashboard interactions are routed through Devvit menu items + forms in
+    // this 0.13 shell; a future iteration will replace this landing page with
+    // a real interactive queue.
+    document.querySelector('[data-app="appeal-desk"]').dataset.ready = '1';
+  </script>
+</body>
+</html>

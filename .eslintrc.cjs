@@ -32,6 +32,9 @@ module.exports = {
     'bench/',
     '*.config.ts',
     '*.config.js',
+    // The 0.11/0.12 Blocks shell, preserved as a reference but excluded from
+    // the build. See docs/UPGRADE_ATTEMPT_2026-05-28.md.
+    'src/_legacy_blocks/',
   ],
   rules: {
     // Allow intentionally-unused args when prefixed with `_` (used throughout
@@ -49,24 +52,6 @@ module.exports = {
     'no-empty': ['error', { allowEmptyCatch: true }],
   },
   overrides: [
-    {
-      // The Devvit shell (.tsx) is type-checked only; keep linting light there.
-      // `jsxFactory: "Devvit.createElement"` (see tsconfig.json) means every JSX
-      // file must import `Devvit` at runtime even though it is never referenced
-      // by name — so the import is NOT an unused variable. `no-unused-vars` can't
-      // see the implicit pragma use, so we exempt the pragma identifier here.
-      files: ['**/*.tsx'],
-      rules: {
-        '@typescript-eslint/no-non-null-assertion': 'off',
-        '@typescript-eslint/no-unused-vars': [
-          'error',
-          {
-            argsIgnorePattern: '^_',
-            varsIgnorePattern: '^(_|Devvit$)',
-          },
-        ],
-      },
-    },
     {
       // The sanitiser strips ASCII control characters by design; the control
       // chars in its regex are intentional, not a mistake. (The code review

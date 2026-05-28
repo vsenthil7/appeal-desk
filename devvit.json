@@ -1,0 +1,27 @@
+{
+  "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
+  "name": "appeal-desk",
+  "blocks": {
+    "entry": "src/main.ts",
+    "forms": { "enable": true },
+    "menu": { "enable": true },
+    "settings": { "enable": true },
+    "triggers": ["onAppInstall", "onAppUpgrade", "onModAction"]
+  },
+  "post": {
+    "dir": "client",
+    "entrypoints": {
+      "default": {
+        "entry": "index.html",
+        "height": "tall"
+      }
+    }
+  },
+  "permissions": {
+    "reddit": { "enable": true, "scope": "moderator" },
+    "redis": true
+  },
+  "dev": {
+    "subreddit": "appeal_desk_dev"
+  }
+}

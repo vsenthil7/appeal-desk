@@ -15,7 +15,8 @@
     "bench": "tsx bench/run.ts"
   },
   "dependencies": {
-    "@devvit/public-api": "0.12.24"
+    "@devvit/public-api": "0.13.0",
+    "@devvit/web": "0.13.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
