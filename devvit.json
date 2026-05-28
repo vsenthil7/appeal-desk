@@ -17,6 +17,10 @@
       }
     }
   },
+  "server": {
+    "dir": "dist/server",
+    "entry": "main.js"
+  },
   "permissions": {
     "reddit": { "enable": true, "scope": "moderator" },
     "redis": true
