@@ -20,11 +20,13 @@
  * `context.redis` / `context.reddit`, the new server uses the module-level
  * `redis` and `reddit` imports from `@devvit/web/server`.
  *
- * All endpoints expect POSTed JSON and respond with JSON.
+ * The HTTP framing (body parsing, JSON responses, route dispatch) is in the
+ * platform-free `./http.js` so it can be unit-tested without pulling in the
+ * Devvit host runtime. This file is the thin wiring layer.
  */
 
 import { createServer, context, redis, reddit, getServerPort } from '@devvit/web/server';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { AppealStore } from '../core/store.js';
 import {
   AppealService,
@@ -35,13 +37,18 @@ import { NoopNotifier } from '../core/notifier.js';
 import { isAppealError } from '../core/errors/index.js';
 import type { AppealDecision } from '../core/types.js';
 import type { QueueCursor } from '../core/store.js';
+import {
+  dispatch,
+  sendJson,
+  sendOk,
+  sendError,
+  str,
+  num,
+  type RouteTable,
+} from './http.js';
 
 /* -------------------------------------------------------------------------
  * Reddit gateway adapter
- *
- * The service expects a small `RedditGateway` with `sendReply`. The new
- * module-level `reddit` from `@devvit/web/server` exposes `modMail` directly
- * (no context wrapper), so the adapter is a thin shim around that.
  * ----------------------------------------------------------------------- */
 
 const gateway: RedditGateway = {
@@ -59,92 +66,17 @@ const gateway: RedditGateway = {
  * Service construction
  *
  * Cheap to call per request. The store wraps the module-level `redis` (which
- * structurally satisfies `RedisLike`). The AI provider is intentionally absent
- * here — the `NoopAiProvider` selected by `selectProvider(false, undefined)`
- * inside the service is the right default, and the AI runtime hook that the
- * legacy Blocks shell used (`context.ai.generateText`) does not have an
- * `@devvit/web/server` equivalent in 0.13.0 (yet). The product still works
- * end-to-end with AI off — that's the whole point of the no-op default.
+ * structurally satisfies `RedisLike`). The AI provider is intentionally
+ * absent here — the `NoopAiProvider` selected by `selectProvider(false,
+ * undefined)` inside the service is the right default, and the AI runtime
+ * hook that the legacy Blocks shell used (`context.ai.generateText`) does
+ * not have an `@devvit/web/server` equivalent in 0.13.0 yet.
  * ----------------------------------------------------------------------- */
 
 function makeService(): AppealService {
   const store = new AppealStore(redis);
-  return new AppealService(
-    store,
-    gateway,
-    undefined, // no AI backend wired in the 0.13 web shell
-    undefined, // default telemetry
-    new NoopNotifier(),
-  );
+  return new AppealService(store, gateway, undefined, undefined, new NoopNotifier());
 }
-
-/* -------------------------------------------------------------------------
- * Tiny HTTP helpers
- * ----------------------------------------------------------------------- */
-
-/** Read a JSON body (or `{}` if absent / malformed). */
-function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8').trim();
-      if (!raw) {
-        resolve({});
-        return;
-      }
-      try {
-        const parsed: unknown = JSON.parse(raw);
-        resolve(
-          typeof parsed === 'object' && parsed !== null
-            ? (parsed as Record<string, unknown>)
-            : {},
-        );
-      } catch {
-        resolve({});
-      }
-    });
-    req.on('error', () => resolve({}));
-  });
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.statusCode = status;
-  res.setHeader('content-type', 'application/json; charset=utf-8');
-  res.end(JSON.stringify(body));
-}
-
-function sendOk(res: ServerResponse, body: unknown): void {
-  sendJson(res, 200, body);
-}
-
-function sendError(res: ServerResponse, err: unknown): void {
-  if (isAppealError(err)) {
-    // AppealError exposes `status`, not `statusCode`. See core/errors/index.ts.
-    sendJson(res, err.status, {
-      error: { code: err.code, message: err.message },
-    });
-    return;
-  }
-  const message = err instanceof Error ? err.message : String(err);
-  sendJson(res, 500, { error: { code: 'INTERNAL', message } });
-}
-
-/** Pick a string field from a parsed body. */
-function str(body: Record<string, unknown>, key: string): string {
-  const v = body[key];
-  return typeof v === 'string' ? v : '';
-}
-
-/** Pick a number field. */
-function num(body: Record<string, unknown>, key: string, fallback: number): number {
-  const v = body[key];
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
-}
-
-/* -------------------------------------------------------------------------
- * Routes
- * ----------------------------------------------------------------------- */
 
 interface RouteContext {
   service: AppealService;
@@ -161,6 +93,10 @@ function buildRouteContext(): RouteContext {
     username: context.username ?? 'unknown',
   };
 }
+
+/* -------------------------------------------------------------------------
+ * Routes
+ * ----------------------------------------------------------------------- */
 
 async function routeAppealsList(
   body: Record<string, unknown>,
@@ -310,12 +246,10 @@ async function routeWhoami(
 }
 
 /* -------------------------------------------------------------------------
- * Dispatcher
+ * Wire up + start
  * ----------------------------------------------------------------------- */
 
-type Handler = (body: Record<string, unknown>, res: ServerResponse) => Promise<void>;
-
-const routes: Record<string, Handler> = {
+export const routes: RouteTable = {
   '/api/appeals/list': routeAppealsList,
   '/api/appeals/open': routeAppealOpen,
   '/api/appeals/suggest-reply': routeSuggestReply,
@@ -327,21 +261,6 @@ const routes: Record<string, Handler> = {
   '/api/whoami': routeWhoami,
 };
 
-const server = createServer(async (req, res) => {
-  try {
-    const url = req.url ?? '';
-    // Strip any query string so /api/foo?bar=baz still routes to /api/foo.
-    const path = url.split('?')[0] ?? '';
-    const handler = routes[path];
-    if (!handler) {
-      sendJson(res, 404, { error: { code: 'NOT_FOUND', message: `No route for ${path}` } });
-      return;
-    }
-    const body = await readJson(req);
-    await handler(body, res);
-  } catch (err) {
-    sendError(res, err);
-  }
-});
+const server = createServer((req, res) => dispatch(req, res, routes));
 
 server.listen(getServerPort());

@@ -11,9 +11,15 @@ export default defineConfig({
       // The testable surface: all pure/injectable logic. The Devvit *.tsx
       // glue (UI components, menu, triggers, scheduler, entrypoint) is thin
       // wiring exercised via playtest, so it's excluded from the unit target.
+      //
+      // Also included: src/server/http.ts — the platform-free HTTP helpers
+      // for the 0.13 web-view server. The wiring in src/server/main.ts that
+      // imports from @devvit/web/server is NOT covered (it's untestable
+      // inside vitest), but the framing code is.
       include: [
         'src/core/**/*.ts',
         'src/ai/**/*.ts',
+        'src/server/http.ts',
       ],
       exclude: [
         'src/core/**/*.test.ts',
