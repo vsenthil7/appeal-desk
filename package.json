@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "devvit playtest",
     "upload": "devvit upload",
-    "build": "tsc --noEmit",
+    "build": "node scripts/build-server.cjs",
+    "build:check": "tsc --noEmit",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "format": "prettier --write \"src/**/*.{ts,tsx}\"",
     "test": "vitest run",
@@ -15,13 +16,15 @@
     "bench": "tsx bench/run.ts"
   },
   "dependencies": {
-    "@devvit/public-api": "0.12.24"
+    "@devvit/public-api": "0.13.0",
+    "@devvit/web": "0.13.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@typescript-eslint/eslint-plugin": "^7.18.0",
     "@typescript-eslint/parser": "^7.18.0",
     "@vitest/coverage-v8": "^1.4.0",
+    "esbuild": "^0.24.2",
     "eslint": "^8.57.0",
     "fast-check": "^3.15.0",
     "prettier": "^3.2.0",

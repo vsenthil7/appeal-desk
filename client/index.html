@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Appeal-Desk — Appeals Dashboard</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="root" class="root" data-screen="queue">
+    <!-- Header (always visible) -->
+    <header class="hdr">
+      <div class="hdr-left">
+        <span class="brand-tick" aria-hidden="true"></span>
+        <span class="brand">Appeal-Desk</span>
+        <span class="badge-open" id="badge-open" hidden>0 open</span>
+      </div>
+      <div class="hdr-right">
+        <button class="btn btn-ghost" id="btn-refresh" type="button" title="Refresh">
+          <span aria-hidden="true">↻</span>
+          <span class="sr-only">Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Tabs (queue / analytics) -->
+    <nav class="tabs" id="tabs">
+      <button class="tab is-active" data-tab="queue" type="button">Queue</button>
+      <button class="tab" data-tab="analytics" type="button">Analytics</button>
+    </nav>
+
+    <!-- Body: rendered by app.js into one of these slots -->
+    <main class="body">
+      <section class="slot" id="slot-queue"></section>
+      <section class="slot" id="slot-analytics" hidden></section>
+      <section class="slot" id="slot-detail" hidden></section>
+      <section class="slot" id="slot-reply" hidden></section>
+    </main>
+
+    <!-- Toast region -->
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
